@@ -436,12 +436,22 @@ class FreeJointRocketTerrainLandingEnv(gym.Env):
         return self.viewer
 
     def reset_with_viewer(self, seed=None, options=None):
-        obs, info = self.reset(seed=seed, options=options)
+        if self.viewer is None or not self.viewer.is_running():
+            obs, info = self.reset(seed=seed, options=options)
+            self.launch_viewer()
+        else:
+            obs, info = self.reset_rocket_on_same_terrain()
+            self.viewer.sync()
+
+        return obs, info
+
+    def reset_rocket_with_viewer(self):
+        obs, info = self.reset_rocket_on_same_terrain()
 
         if self.viewer is None or not self.viewer.is_running():
             self.launch_viewer()
         else:
-            self.launch_viewer()
+            self.viewer.sync()
 
         return obs, info
 
@@ -546,9 +556,8 @@ class FreeJointRocketTerrainLandingEnv(gym.Env):
                 if too_low or timed_out:
                     print(self._reset_debug_info("Episode bitti"))
                     time.sleep(0.5)
-                    obs, info = self.reset_rocket_on_same_terrain()
-                    self.viewer.sync()
-                    print(self._reset_debug_info("Roket reset"))
+                    obs, info = self.reset_with_viewer()
+                    print(self._reset_debug_info("Yeni terrain reset"))
 
         except KeyboardInterrupt:
             print("Ctrl+C ile çıkıldı.")
