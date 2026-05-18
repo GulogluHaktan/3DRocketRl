@@ -1,14 +1,18 @@
-# MuJoCo Rocket Landing Terrain
+# MuJoCo Hopper Rocket RL
 
-Free-joint rocket landing environment built with MuJoCo and Gymnasium. The rocket learns to land on a small green tile-pad placed inside randomly generated terrain.
+MuJoCo + Gymnasium environments for a TVC hopper rocket. The active workflow is
+split into takeoff, hover, and landing phases so each task can be trained and
+edited separately.
 
 ## Included Files
 
-- `rocket_env_tilepad.py`: Gymnasium environment and standalone empty MuJoCo viewer.
-- `rocket_rl_tilepad.py`: PPO train/watch/drop-test runner.
-- `rocket_env_takeoff.py`: Separate takeoff environment.
-- `rocket_rl_takeoff.py`: PPO train/watch runner for takeoff.
-- `ppo_freejoint_landing_terrain.zip`: included pretrained terrain landing model.
+- `hopper_default.xml`: Real hopper MuJoCo model.
+- `hopper_env.py`: shared physics, observations, contacts, camera, and reward helpers.
+- `hopper_env_takeoff.py`: takeoff task entrypoint.
+- `hopper_env_hover.py`: hover task entrypoint.
+- `hopper_env_landing.py`: landing task entrypoint.
+- `hopper_rl.py`: PPO train/watch/mission runner for the hopper tasks.
+- `archive_unused/`: old experiments and stale models kept for reference.
 - `requirements.txt`: Python dependencies.
 
 ## Setup
@@ -21,110 +25,77 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run Without RL
-
-This opens the environment with no PPO model and no control forces:
-
-```bash
-python rocket_env_tilepad.py
-```
-
-## Watch The Model
-
-```bash
-python rocket_rl_tilepad.py --mode landing
-```
-
-`rocket_rl_tilepad.py` looks for models in this order:
-
-1. `ppo_freejoint_landing_terrain_tilepad_split_smallzone.zip`
-2. `ppo_freejoint_landing_terrain.zip`
-3. `ppo_freejoint_landing.zip`
-4. `ppo_freejoint_hover.zip`
-
-## Mission Mode
-
-Run the terrain mission with three policies chained together:
-
-1. takeoff model
-2. hover model for 5 seconds
-3. landing model
-
-```bash
-python rocket_rl_tilepad.py --mode normal
-```
-
-Run each phase by itself inside the terrain environment:
-
-```bash
-python rocket_rl_tilepad.py --mode takeoff
-python rocket_rl_tilepad.py --mode hover
-python rocket_rl_tilepad.py --mode flip
-python rocket_rl_tilepad.py --mode landing
-```
-
-Run the stunt mission: takeoff, 360 flip, then landing:
-
-```bash
-python rocket_rl_tilepad.py --mode stunt
-```
-
-## Train
-
-```bash
-python rocket_rl_tilepad.py --mode train --timesteps 300000
-```
-
-Training saves the tile-pad model as:
+The `hopper_*` files use `hopper_default.xml` as the rocket model. The action
+space is:
 
 ```text
-ppo_freejoint_landing_terrain_tilepad_split_smallzone.zip
+[main_thrust, yaw_tvc, pitch_tvc]
 ```
 
-## Drop Test
-
-Use this for simple foot / terrain contact debugging without RL:
+Train the three normal flight phases for the real model:
 
 ```bash
-python rocket_rl_tilepad.py --mode drop_test
+python hopper_rl.py --mode train_all --timesteps 250000
 ```
 
-## Takeoff Model
-
-Train the separate takeoff model:
+Start each phase from a previous phase model when possible:
 
 ```bash
-python rocket_rl_takeoff.py --mode train --timesteps 300000
+python hopper_rl.py --mode train_all --timesteps 250000 --transfer
 ```
 
-Watch the takeoff policy:
+Training writes CSV logs under `training_logs/ppo_hopper_<task>/`:
 
-```bash
-python rocket_rl_takeoff.py --mode watch
+```text
+progress.csv
+episodes.monitor.csv
 ```
 
-Run a fixed-thrust smoke test without RL:
+Read the current training status:
 
 ```bash
-python rocket_rl_takeoff.py --mode thrust_test
+python hopper_rl.py --mode summary --task landing
 ```
 
-## Flip Model
-
-Train the separate 360-roll model:
+If an old model behaves badly after environment/reward changes, start a fresh
+policy:
 
 ```bash
-python rocket_rl_flip.py --mode train --timesteps 300000
+python hopper_rl.py --mode train_all --timesteps 250000 --fresh
 ```
 
-Watch the flip policy:
+Train phases one by one:
 
 ```bash
-python rocket_rl_flip.py --mode watch
+python hopper_rl.py --mode train --task takeoff --timesteps 250000
+python hopper_rl.py --mode train --task hover --timesteps 250000
+python hopper_rl.py --mode train --task landing --timesteps 250000
 ```
 
-Run a fixed right-motor smoke test:
+Landing is easier to train as a curriculum:
 
 ```bash
-python rocket_rl_flip.py --mode right_motor_test
+python hopper_rl.py --mode train --task landing --timesteps 150000 --fresh --landing-start-z 3
+python hopper_rl.py --mode train --task landing --timesteps 150000 --landing-start-z 6
+python hopper_rl.py --mode train --task landing --timesteps 250000 --landing-start-z 10
+```
+
+Watch a single model:
+
+```bash
+python hopper_rl.py --mode watch --task takeoff
+python hopper_rl.py --mode watch --task hover
+python hopper_rl.py --mode watch --task landing
+```
+
+Run the chained mission after takeoff, hover, and landing models exist:
+
+```bash
+python hopper_rl.py --mode mission
+```
+
+Run a no-RL smoke test:
+
+```bash
+python hopper_rl.py --mode smoke --task takeoff
 ```
