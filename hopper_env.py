@@ -17,9 +17,10 @@ OBSERVATION_NAMES = (
     "bottom_target_delta_x",
     "bottom_target_delta_y",
     "bottom_target_delta_z",
-    "body_axis_x",
-    "body_axis_y",
-    "body_axis_z",
+    "body_quat_w",
+    "body_quat_x",
+    "body_quat_y",
+    "body_quat_z",
     "bottom_height",
     "linear_velocity_x",
     "linear_velocity_y",
@@ -36,7 +37,6 @@ OBSERVATION_NAMES = (
     "foot3_contact",
     "foot4_contact",
     "main_motor_power",
-    "top_angle_to_vertical",
 )
 
 
@@ -123,7 +123,8 @@ class HopperEnv(gym.Env):
 
     def get_observation(self):
         pos, rot, lin_vel, ang_vel = self.get_state()
-        body_axis = rot @ np.array([0.0, 0.0, 1.0])
+        body_quat = self.data.qpos[3:7].copy()
+        body_quat /= max(np.linalg.norm(body_quat), 1e-8)
         bottom_point = pos + rot @ np.array([0.0, 0.0, -0.355])
         target_delta = self.target_pos - bottom_point
         tvc_yaw = float(self.data.qpos[self.yaw_qpos_id])
@@ -131,11 +132,10 @@ class HopperEnv(gym.Env):
         tvc_yaw_vel = float(self.data.qvel[self.yaw_qvel_id])
         tvc_pitch_vel = float(self.data.qvel[self.pitch_qvel_id])
         contacts = self.foot_contacts()
-        top_angle = float(np.arccos(np.clip(body_axis[2], -1.0, 1.0)))
 
         return np.array([
             *target_delta,
-            *body_axis,
+            *body_quat,
             bottom_point[2],
             *lin_vel,
             *ang_vel,
@@ -145,7 +145,6 @@ class HopperEnv(gym.Env):
             tvc_pitch_vel,
             *contacts,
             self.main_motor_power,
-            top_angle,
         ], dtype=np.float32)
 
     def get_info(self):
