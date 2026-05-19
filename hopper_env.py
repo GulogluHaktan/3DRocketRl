@@ -116,8 +116,8 @@ class HopperEnv(gym.Env):
                 time.sleep(self.model.opt.timestep)
 
         obs = self.get_observation()
-        reward = self._reward()
-        terminated = self._is_terminal()
+        reward = 0.0
+        terminated = False
         truncated = self.step_count >= self.max_steps
         return obs, reward, terminated, truncated, self.get_info()
 
@@ -195,38 +195,6 @@ class HopperEnv(gym.Env):
         )
         self.data.xfrc_applied[self.body_id, 0:3] = -self.linear_damping * lin_vel
         self.data.xfrc_applied[self.body_id, 3:6] = -self.angular_damping * ang_vel
-
-    def _reward(self):
-        pos, rot, lin_vel, ang_vel = self.get_state()
-        body_axis = rot @ np.array([0.0, 0.0, 1.0])
-        xy_distance = float(np.linalg.norm(pos[:2] - self.target_pos[:2]))
-        horizontal_speed = float(np.linalg.norm(lin_vel[:2]))
-        vertical_speed = abs(float(lin_vel[2]))
-        top_angle = float(np.arccos(np.clip(body_axis[2], -1.0, 1.0)))
-        target_height_error = abs(float(pos[2] - self.target_pos[2]))
-        contact_count = float(np.sum(self.foot_contacts()))
-
-        return float(
-            3.0 * max(1.0 - top_angle / 0.25, -2.0)
-            + 2.0 * max(1.0 - xy_distance / 0.25, -3.0)
-            - 4.0 * horizontal_speed
-            - 0.8 * vertical_speed
-            - 0.2 * target_height_error
-            - 0.3 * np.linalg.norm(ang_vel)
-            + 2.0 * (contact_count >= 2.0)
-        )
-
-    def _is_terminal(self):
-        pos, rot, lin_vel, _ = self.get_state()
-        top_angle = float(np.arccos(np.clip((rot @ np.array([0.0, 0.0, 1.0]))[2], -1.0, 1.0)))
-        xy_distance = float(np.linalg.norm(pos[:2] - self.target_pos[:2]))
-        if pos[2] < 0.20 or pos[2] > self.start_z + 2.0:
-            return True
-        if xy_distance > 2.5 or top_angle > np.deg2rad(75.0):
-            return True
-        if np.sum(self.foot_contacts()) >= 2 and abs(lin_vel[2]) < 0.4 and xy_distance < 0.25:
-            return True
-        return False
 
     def launch_viewer(self):
         self.close_viewer()
