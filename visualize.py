@@ -31,7 +31,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model",
-        default="sac_hopper.zip",
+        default="sac_hopper_latest.zip",
         help="SAC train dosyasinin kaydettigi model zip yolu.",
     )
     parser.add_argument(
@@ -55,9 +55,45 @@ def main():
         default=10.0,
         help="Baslangic yuksekligi.",
     )
+    parser.add_argument(
+        "--fixed-start-z",
+        action="store_true",
+        help="Random reset yuksekligi yerine --start-z kullan.",
+    )
+    parser.add_argument(
+        "--min-start-z",
+        type=float,
+        default=0.5,
+        help="Random reset minimum yuksekligi.",
+    )
+    parser.add_argument(
+        "--max-start-z",
+        type=float,
+        default=10.0,
+        help="Random reset maksimum yuksekligi.",
+    )
+    parser.add_argument(
+        "--max-thrust",
+        type=float,
+        default=None,
+        help="Maksimum thrust Newton. Varsayilan: 3.6 kgf.",
+    )
+    parser.add_argument(
+        "--max-tvc-deg",
+        type=float,
+        default=20.0,
+        help="Maksimum TVC acisi derece.",
+    )
     args = parser.parse_args()
 
-    env = HopperEnv(start_z=args.start_z)
+    env = HopperEnv(
+        start_z=args.start_z,
+        max_thrust=args.max_thrust,
+        max_tvc_deg=args.max_tvc_deg,
+        random_start_z=not args.fixed_start_z,
+        min_start_z=args.min_start_z,
+        max_start_z=args.max_start_z,
+    )
     obs, _ = env.reset()
     model = None
 

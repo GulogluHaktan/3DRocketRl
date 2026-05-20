@@ -1,23 +1,27 @@
-# MuJoCo Hopper Rocket RL
+# MuJoCo SAC Hopper Rocket
 
-MuJoCo + Gymnasium environments for a TVC hopper rocket. The active workflow is
-split into takeoff, hover, and landing phases so each task can be trained and
-edited separately.
+MuJoCo + Gymnasium environment for a TVC hopper rocket trained with SAC. The
+current task uses a phase-based reward system:
 
-## Included Files
+```text
+climb -> flip -> recovery -> hover -> done
+```
 
-- `hopper_default.xml`: Real hopper MuJoCo model.
-- `hopper_env.py`: shared physics, observations, contacts, camera, and reward helpers.
-- `hopper_env_takeoff.py`: takeoff task entrypoint.
-- `hopper_env_hover.py`: hover task entrypoint.
-- `hopper_env_landing.py`: landing task entrypoint.
-- `hopper_rl.py`: PPO train/watch/mission runner for the hopper tasks.
-- `archive_unused/`: old experiments and stale models kept for reference.
+## Files
+
+- `hopper_default.xml`: MuJoCo rocket/hopper model.
+- `hopper_env.py`: Gymnasium environment, observations, physics controls, reward, fail logic, and viewer camera follow.
+- `rl.py`: SAC train/watch/plot entrypoint.
+- `visualize.py`: Lightweight viewer for a trained SAC model, random actions, or zero actions.
+- `RL_RewardFunction.pdf`: Original reward draft.
+- `RL_RewardFunction_updated.docx`: Updated reward document matching the current environment.
 - `requirements.txt`: Python dependencies.
+
+Training outputs are written under `runs/` and are ignored by Git.
 
 ## Setup
 
-Python 3.10-3.12 is recommended for the smoothest MuJoCo / Stable-Baselines3 install.
+Python 3.10-3.12 is recommended for MuJoCo and Stable-Baselines3.
 
 ```bash
 python -m venv .venv
@@ -25,77 +29,53 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The `hopper_*` files use `hopper_default.xml` as the rocket model. The action
-space is:
+## Train
+
+```bash
+python rl.py train --timesteps 250000 --chunk-steps 25000
+```
+
+The trainer saves:
 
 ```text
-[main_thrust, yaw_tvc, pitch_tvc]
+runs/sac_hopper_<timestamp>/steps_chunk_*.csv
+runs/sac_hopper_<timestamp>/checkpoints/sac_hopper_*.zip
+runs/sac_hopper_<timestamp>/sac_hopper_latest.zip
+sac_hopper_latest.zip
 ```
 
-Train the three normal flight phases for the real model:
+## Watch
+
+Watch the latest root model:
 
 ```bash
-python hopper_rl.py --mode train_all --timesteps 250000
+python rl.py watch --model sac_hopper_latest.zip
 ```
 
-Start each phase from a previous phase model when possible:
+Watch a specific run:
 
 ```bash
-python hopper_rl.py --mode train_all --timesteps 250000 --transfer
+python rl.py watch --model runs/sac_hopper_<timestamp>/sac_hopper_latest.zip
 ```
 
-Training writes CSV logs under `training_logs/ppo_hopper_<task>/`:
-
-```text
-progress.csv
-episodes.monitor.csv
-```
-
-Read the current training status:
+Start from a fixed height:
 
 ```bash
-python hopper_rl.py --mode summary --task landing
+python rl.py watch --model sac_hopper_latest.zip --fixed-start-z --start-z 9.3
 ```
 
-If an old model behaves badly after environment/reward changes, start a fresh
-policy:
+## Visualize
 
 ```bash
-python hopper_rl.py --mode train_all --timesteps 250000 --fresh
+python visualize.py --model sac_hopper_latest.zip
+python visualize.py --random
+python visualize.py --zero
 ```
 
-Train phases one by one:
+## Notes
 
-```bash
-python hopper_rl.py --mode train --task takeoff --timesteps 250000
-python hopper_rl.py --mode train --task hover --timesteps 250000
-python hopper_rl.py --mode train --task landing --timesteps 250000
-```
-
-Landing is easier to train as a curriculum:
-
-```bash
-python hopper_rl.py --mode train --task landing --timesteps 150000 --fresh --landing-start-z 3
-python hopper_rl.py --mode train --task landing --timesteps 150000 --landing-start-z 6
-python hopper_rl.py --mode train --task landing --timesteps 250000 --landing-start-z 10
-```
-
-Watch a single model:
-
-```bash
-python hopper_rl.py --mode watch --task takeoff
-python hopper_rl.py --mode watch --task hover
-python hopper_rl.py --mode watch --task landing
-```
-
-Run the chained mission after takeoff, hover, and landing models exist:
-
-```bash
-python hopper_rl.py --mode mission
-```
-
-Run a no-RL smoke test:
-
-```bash
-python hopper_rl.py --mode smoke --task takeoff
-```
+- Action space: `[main_thrust, yaw_tvc, pitch_tvc]`.
+- Max thrust defaults to `3.6 kgf`.
+- Max TVC angle defaults to `20 deg`.
+- TVC servo speed is limited to `60 deg / 0.14 s`.
+- Viewer camera follows the rocket body.

@@ -8,6 +8,15 @@ env/
 MUJOCO_LOG.TXT
 *.log
 
+# Training outputs / generated models
+runs/
+training_logs/
+model_backups/
+archive_unused/
+__pycache__/
+*.pyc
+ppo_*.zip
+
 .idea/
 .vscode/
 .DS_Store
