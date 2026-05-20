@@ -7,16 +7,25 @@ import numpy as np
 from hopper_env import HopperEnv, OBSERVATION_NAMES
 
 
-def load_sac_model(model_path, env):
+ALGORITHMS = {
+    "sac": ("stable_baselines3", "SAC"),
+    "ppo": ("stable_baselines3", "PPO"),
+    "td3": ("stable_baselines3", "TD3"),
+}
+
+
+def load_model(algo, model_path, env):
     try:
-        from stable_baselines3 import SAC
+        module_name, class_name = ALGORITHMS[algo]
+        module = __import__(module_name, fromlist=[class_name])
+        Algorithm = getattr(module, class_name)
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "stable_baselines3 kurulu degil. SAC model izlemek icin "
+            "stable_baselines3 kurulu degil. Model izlemek icin "
             "`pip install stable-baselines3` gerekli."
         ) from exc
 
-    return SAC.load(str(model_path), env=env, device="cpu")
+    return Algorithm.load(str(model_path), env=env, device="cpu")
 
 
 def print_observation(obs):
@@ -30,9 +39,15 @@ def print_observation(obs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--algo",
+        choices=sorted(ALGORITHMS),
+        default="sac",
+        help="Yuklenecek modelin algoritmasi.",
+    )
+    parser.add_argument(
         "--model",
-        default="sac_hopper_latest.zip",
-        help="SAC train dosyasinin kaydettigi model zip yolu.",
+        default=None,
+        help="Train dosyasinin kaydettigi model zip yolu.",
     )
     parser.add_argument(
         "--random",
@@ -98,14 +113,14 @@ def main():
     model = None
 
     if not args.random and not args.zero:
-        model_path = Path(args.model)
+        model_path = Path(args.model or f"{args.algo}_hopper_latest.zip")
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Model bulunamadi: {model_path}\n"
                 "Random deneme icin: python visualize.py --random"
             )
-        model = load_sac_model(model_path, env)
-        print(f"SAC modeli yuklendi: {model_path}")
+        model = load_model(args.algo, model_path, env)
+        print(f"{args.algo.upper()} modeli yuklendi: {model_path}")
 
     viewer = env.launch_viewer()
     step_count = 0

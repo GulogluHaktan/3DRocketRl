@@ -44,6 +44,48 @@ PHASES = ("climb", "flip", "recovery", "hover", "done")
 FULL_FLIP_RAD = 2.0 * np.pi
 
 
+DEFAULT_REWARD_WEIGHTS = {
+    "climb_z_error": 1.5,
+    "climb_high_z": 0.5,
+    "climb_low_altitude": 1.0,
+    "climb_low_altitude_sq": 0.5,
+    "climb_x": 1.15,
+    "climb_y": 1.25,
+    "climb_rel_dist_sq": 1.5,
+    "climb_angular_speed": 2.0,
+    "climb_joint_speed": 0.09,
+    "climb_upright": 15.0,
+    "climb_speed": 3.4,
+    "flip_height_error": 0.35,
+    "flip_progress": 35.0,
+    "flip_stall": 0.35,
+    "flip_overrotate": 1.0,
+    "flip_low_altitude": 2.5,
+    "flip_upright_change": 30.0,
+    "flip_high_angular_speed": 1.0,
+    "flip_axis_alignment": 8.0,
+    "flip_off_axis": 0.65,
+    "flip_joint_speed": 0.12,
+    "flip_side_deviation": 3.0,
+    "flip_rel_dist": 3.0,
+    "flip_rel_dist_sq": 1.5,
+    "flip_late_angular_speed": 0.45,
+    "flip_body_spin": 0.35,
+    "recovery_linear_speed": 1.5,
+    "recovery_angular_speed": 1.45,
+    "recovery_joint_speed": 0.09,
+    "recovery_upright": 30.0,
+    "recovery_flip_progress": 30.0,
+    "recovery_rel_dist": 30.0,
+    "recovery_rel_progress": 50.0,
+    "hover_linear_speed": 1.5,
+    "hover_angular_speed": 1.45,
+    "hover_joint_speed": 0.09,
+    "hover_upright": 30.0,
+    "hover_rel_dist": 30.0,
+}
+
+
 class HopperEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
@@ -56,6 +98,7 @@ class HopperEnv(gym.Env):
         random_start_z: bool = True,
         min_start_z: float = 0.5,
         max_start_z: float = 10.0,
+        reward_weights: dict[str, float] | None = None,
     ):
         super().__init__()
         self.model = mujoco.MjModel.from_xml_path(str(MODEL_XML))
@@ -80,6 +123,9 @@ class HopperEnv(gym.Env):
         self.min_start_z = float(min_start_z)
         self.max_start_z = float(max_start_z)
         self.target_pos = np.asarray(target_pos, dtype=np.float64)
+        self.reward_weights = DEFAULT_REWARD_WEIGHTS.copy()
+        if reward_weights:
+            self.reward_weights.update(reward_weights)
         self.max_thrust = float(max_thrust if max_thrust is not None else 3.6 * 9.80665)
         self.max_tvc_angle = np.deg2rad(float(max_tvc_deg))
         self.tvc_servo_speed = np.deg2rad(60.0 / 0.14)
@@ -393,19 +439,20 @@ class HopperEnv(gym.Env):
         low_altitude_error = max(9.0 - z, 0.0)
 
         reward = 0.0
+        rw = self.reward_weights
         if z < 10.5:
-            reward -= abs(z - target_z) * 1.5
+            reward -= abs(z - target_z) * rw["climb_z_error"]
         else:
-            reward -= 0.5 * z
-        reward -= low_altitude_error * 1.0
-        reward -= low_altitude_error ** 2 * 0.5
-        reward -= abs(float(relative_pos[0])) * 1.15
-        reward -= abs(float(relative_pos[1])) * 1.25
-        reward -= metrics["rel_dist"] ** 2 * 1.5
-        reward -= w * 2.0
-        reward -= joint_speed * 0.09
-        reward += upright_score * 15.0
-        reward -= (horizontal_speed + vertical_speed) * 3.4
+            reward -= rw["climb_high_z"] * z
+        reward -= low_altitude_error * rw["climb_low_altitude"]
+        reward -= low_altitude_error ** 2 * rw["climb_low_altitude_sq"]
+        reward -= abs(float(relative_pos[0])) * rw["climb_x"]
+        reward -= abs(float(relative_pos[1])) * rw["climb_y"]
+        reward -= metrics["rel_dist"] ** 2 * rw["climb_rel_dist_sq"]
+        reward -= w * rw["climb_angular_speed"]
+        reward -= joint_speed * rw["climb_joint_speed"]
+        reward += upright_score * rw["climb_upright"]
+        reward -= (horizontal_speed + vertical_speed) * rw["climb_speed"]
 
         fail = bool(abs(relative_pos[0]) > 3.0 or abs(relative_pos[1]) > 2.0)
         return reward, fail
@@ -422,31 +469,32 @@ class HopperEnv(gym.Env):
         off_axis_angular_speed = metrics["off_axis_angular_speed"]
         expected_axis_alignment = metrics["expected_axis_alignment"]
         progress_delta = abs(self.flip_progress) - abs(self.last_step_flip_progress)
+        rw = self.reward_weights
 
         reward = 0.0
         flip_height_error = abs(z - 10.0)
-        reward -= flip_height_error * 0.35
-        reward += progress_delta * 35.0
+        reward -= flip_height_error * rw["flip_height_error"]
+        reward += progress_delta * rw["flip_progress"]
         if progress_delta <= 0.001:
-            reward -= 0.35
+            reward -= rw["flip_stall"]
         if self.flip_progress > 1.0:
-            reward -= self.flip_progress * 1.0
+            reward -= self.flip_progress * rw["flip_overrotate"]
         if z < 5.0:
-            reward -= z * 2.5
+            reward -= z * rw["flip_low_altitude"]
         upright_change = abs(upright_score - self.last_upright_score)
         if upright_change > 0.3:
-            reward -= upright_change * 30.0
+            reward -= upright_change * rw["flip_upright_change"]
         if w > 30.0:
-            reward -= w * 1.0
-        reward += expected_axis_alignment * 8.0
-        reward -= off_axis_angular_speed * 0.65
-        reward -= joint_speed * 0.12
-        reward -= side_deviation * 3.0
-        reward -= metrics["rel_dist"] * 3.0
-        reward -= metrics["rel_dist"] ** 2 * 1.5
+            reward -= w * rw["flip_high_angular_speed"]
+        reward += expected_axis_alignment * rw["flip_axis_alignment"]
+        reward -= off_axis_angular_speed * rw["flip_off_axis"]
+        reward -= joint_speed * rw["flip_joint_speed"]
+        reward -= side_deviation * rw["flip_side_deviation"]
+        reward -= metrics["rel_dist"] * rw["flip_rel_dist"]
+        reward -= metrics["rel_dist"] ** 2 * rw["flip_rel_dist_sq"]
         if self.flip_progress > 0.75:
-            reward -= w * 0.45
-        reward -= 0.35 * abs(spin_about_body_axis)
+            reward -= w * rw["flip_late_angular_speed"]
+        reward -= rw["flip_body_spin"] * abs(spin_about_body_axis)
 
         fail = bool((z < 3.5 and self.flip_progress < 0.15) or w > 70.0)
         return reward, fail
@@ -458,15 +506,16 @@ class HopperEnv(gym.Env):
         upright_score = metrics["upright_score"]
         rel_dist = metrics["rel_dist"]
         rel_progress = self.last_rel_dist - rel_dist
+        rw = self.reward_weights
 
         reward = 0.0
-        reward -= v * 1.5
-        reward -= w * 1.45
-        reward -= joint_speed * 0.09
-        reward += 30.0 * upright_score
-        reward += 30.0 * self.flip_progress
-        reward -= rel_dist * 30.0
-        reward += rel_progress * 50.0
+        reward -= v * rw["recovery_linear_speed"]
+        reward -= w * rw["recovery_angular_speed"]
+        reward -= joint_speed * rw["recovery_joint_speed"]
+        reward += rw["recovery_upright"] * upright_score
+        reward += rw["recovery_flip_progress"] * self.flip_progress
+        reward -= rel_dist * rw["recovery_rel_dist"]
+        reward += rel_progress * rw["recovery_rel_progress"]
 
         fail = bool(v > 70.0 or w > 70.0 or rel_dist > 1.5)
         return reward, fail
@@ -477,13 +526,14 @@ class HopperEnv(gym.Env):
         joint_speed = metrics["joint_speed"]
         upright_score = metrics["upright_score"]
         rel_dist = metrics["rel_dist"]
+        rw = self.reward_weights
 
         reward = 0.0
-        reward -= v * 1.5
-        reward -= w * 1.45
-        reward -= joint_speed * 0.09
-        reward += 30.0 * upright_score
-        reward -= rel_dist * 30.0
+        reward -= v * rw["hover_linear_speed"]
+        reward -= w * rw["hover_angular_speed"]
+        reward -= joint_speed * rw["hover_joint_speed"]
+        reward += rw["hover_upright"] * upright_score
+        reward -= rel_dist * rw["hover_rel_dist"]
 
         fail = bool(rel_dist > 1.5 or v > 70.0 or w > 70.0)
         return reward, fail
