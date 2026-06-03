@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hopper_env import HopperEnv, OBSERVATION_NAMES
+from hopper_env import HopperEnv
 
 
 EXTRA_INFO_KEYS = (
@@ -17,25 +17,32 @@ EXTRA_INFO_KEYS = (
     "phase_bonus",
     "flip_progress",
     "hover_timer",
+    "climb_ready_timer",
+    "flip_low_altitude_stall_timer",
+    "recovery_low_altitude_timer",
     "upright_score",
     "rel_dist",
     "linear_speed",
     "angular_speed",
     "joint_speed",
     "height",
+    "main_thrust_newton",
 )
 
 
-def make_env(args, reward_weights=None):
-    return HopperEnv(
-        start_z=args.start_z,
-        max_thrust=args.max_thrust,
-        max_tvc_deg=args.max_tvc_deg,
-        random_start_z=not args.fixed_start_z,
-        min_start_z=args.min_start_z,
-        max_start_z=args.max_start_z,
-        reward_weights=reward_weights,
-    )
+def make_env(args, reward_weights=None, env_kwargs=None):
+    env_kwargs = env_kwargs or {}
+    config = {
+        "start_z": args.start_z,
+        "max_thrust": args.max_thrust,
+        "max_tvc_deg": args.max_tvc_deg,
+        "random_start_z": not args.fixed_start_z,
+        "min_start_z": args.min_start_z,
+        "max_start_z": args.max_start_z,
+        "reward_weights": reward_weights,
+    }
+    config.update(env_kwargs)
+    return HopperEnv(**config)
 
 
 def make_run_dir(algo_name, base_dir="runs"):
@@ -46,12 +53,20 @@ def make_run_dir(algo_name, base_dir="runs"):
     return run_dir
 
 
-def make_step_callback(csv_path, chunk_index, BaseCallback):
+def make_step_callback(
+    csv_path,
+    chunk_index,
+    BaseCallback,
+    observation_names,
+    run_start_timesteps,
+    run_total_timesteps,
+):
     class StepCSVCallback(BaseCallback):
         def __init__(self):
             super().__init__()
             self.file = None
             self.writer = None
+            self.next_progress_update = 0
 
         def _on_training_start(self):
             self.file = csv_path.open("w", newline="")
@@ -60,11 +75,12 @@ def make_step_callback(csv_path, chunk_index, BaseCallback):
                 "chunk",
                 "reward",
                 "done",
-                *OBSERVATION_NAMES,
+                *observation_names,
                 *EXTRA_INFO_KEYS,
             )
             self.writer = csv.DictWriter(self.file, fieldnames=fields)
             self.writer.writeheader()
+            self.next_progress_update = self.num_timesteps
 
         def _on_step(self):
             infos = self.locals.get("infos", [])
@@ -80,27 +96,56 @@ def make_step_callback(csv_path, chunk_index, BaseCallback):
                 "reward": float(rewards[0]) if len(rewards) else 0.0,
                 "done": bool(dones[0]) if len(dones) else False,
             }
-            for key in OBSERVATION_NAMES:
+            for key in observation_names:
                 row[key] = info.get(key, "")
             for key in EXTRA_INFO_KEYS:
                 row[key] = info.get(key, "")
 
             self.writer.writerow(row)
+            self._print_progress()
             return True
 
         def _on_training_end(self):
+            self._print_progress(force=True)
             if self.file is not None:
                 self.file.close()
+
+        def _print_progress(self, force=False):
+            if not force and self.num_timesteps < self.next_progress_update:
+                return
+
+            completed = max(0, self.num_timesteps - run_start_timesteps)
+            completed = min(completed, run_total_timesteps)
+            pct = 100.0 * completed / max(run_total_timesteps, 1)
+            width = 30
+            filled = int(width * pct / 100.0)
+            bar = "#" * filled + "-" * (width - filled)
+            print(
+                f"\rTrain progress [{bar}] {pct:6.2f}% "
+                f"({completed}/{run_total_timesteps})",
+                end="",
+                flush=True,
+            )
+            self.next_progress_update = self.num_timesteps + 1000
 
     return StepCSVCallback()
 
 
-def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_weights=None):
+def train_loop(
+    args,
+    algo_name,
+    Algorithm,
+    BaseCallback,
+    model_kwargs,
+    reward_weights=None,
+    env_kwargs=None,
+):
     run_dir = Path(args.run_dir) if args.run_dir else make_run_dir(algo_name, args.runs_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
 
-    env = make_env(args, reward_weights=reward_weights)
+    env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+    observation_names = tuple(env.observation_names)
     root_model = f"{algo_name}_hopper_latest.zip"
     run_model = run_dir / root_model
 
@@ -113,13 +158,21 @@ def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_we
 
     remaining = args.timesteps
     chunk_index = 0
+    run_start_timesteps = model.num_timesteps
 
     while remaining > 0:
         chunk_steps = min(args.chunk_steps, remaining)
         chunk_index += 1
         csv_path = run_dir / f"steps_chunk_{chunk_index:03d}.csv"
         print(f"\n=== {algo_name.upper()} CHUNK {chunk_index} | {chunk_steps} step | {csv_path} ===")
-        callback = make_step_callback(csv_path, chunk_index, BaseCallback)
+        callback = make_step_callback(
+            csv_path,
+            chunk_index,
+            BaseCallback,
+            observation_names,
+            run_start_timesteps,
+            args.timesteps,
+        )
         model.learn(
             total_timesteps=chunk_steps,
             reset_num_timesteps=False,
@@ -130,7 +183,7 @@ def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_we
         model.save(checkpoint)
         model.save(run_model)
         model.save(root_model)
-        print(f"Checkpoint kaydedildi: {checkpoint}")
+        print(f"\nCheckpoint kaydedildi: {checkpoint}")
         remaining -= chunk_steps
 
     plot_run(run_dir)
@@ -138,8 +191,9 @@ def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_we
     print(f"Run klasoru: {run_dir}")
 
 
-def watch_model(args, algo_name, Algorithm, reward_weights=None):
-    env = make_env(args, reward_weights=reward_weights)
+def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None):
+    env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+    observation_names = tuple(env.observation_names)
     obs, _ = env.reset()
     model_path = args.model or f"{algo_name}_hopper_latest.zip"
     model = Algorithm.load(model_path, env=env, device="cpu")
@@ -152,7 +206,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None):
         csv_file = csv_path.open("w", newline="")
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=("step", "reward", *OBSERVATION_NAMES, *EXTRA_INFO_KEYS),
+            fieldnames=("step", "reward", *observation_names, *EXTRA_INFO_KEYS),
         )
         writer.writeheader()
 
@@ -165,7 +219,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None):
 
             if writer is not None:
                 row = {"step": step_count, "reward": reward}
-                for key in OBSERVATION_NAMES:
+                for key in observation_names:
                     row[key] = info.get(key, "")
                 for key in EXTRA_INFO_KEYS:
                     row[key] = info.get(key, "")
@@ -184,6 +238,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None):
                     "linear_speed": round(float(info.get("linear_speed", 0.0)), 3),
                     "angular_speed": round(float(info.get("angular_speed", 0.0)), 3),
                     "joint_speed": round(float(info.get("joint_speed", 0.0)), 3),
+                    "thrust_N": round(float(info.get("main_thrust_newton", 0.0)), 3),
                 })
                 obs, _ = env.reset()
                 step_count = 0

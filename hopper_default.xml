@@ -278,4 +278,9 @@
 
     </actuator>
 
+    <sensor>
+        <user name="main_thrust_newton" dim="1"/>
+        <user name="main_thrust_percent" dim="1"/>
+    </sensor>
+
 </mujoco>
