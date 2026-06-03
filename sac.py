@@ -3,110 +3,49 @@ from __future__ import annotations
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
 
-from rl_common import train_loop, watch_model
+from rl_common import evaluate_model, train_loop, watch_model
 
 
 ALGO_NAME = "sac"
 REWARD_WEIGHTS = {
-    # SAC buyuk reward araliklarinda entropi dengesini cabuk kaybedebiliyor.
-    # Bu set terminal odulleri yumusatip her adima kucuk zaman cezasi ekler.
-    "time_penalty": 0.03,
-    "failure_penalty": 60.0,
-    "success_bonus": 120.0,
-    "fail_penalty": 60.0,
-
-    "climb_z_error": 1.5,
-    "climb_high_z": 0.5,
-    "climb_x": 1.15,
-    "climb_y": 1.25,
-    "climb_angular_speed": 2.0,
-    "climb_joint_speed": 0.09,
-    "climb_upright": 15.0,
-    "climb_speed": 3.4,
-    "climb_altitude_progress": 140.0,
-    "climb_upward_speed": 3.5,
-    "climb_ready_dwell": 25.0,
-
-    "flip_height_reward": 0.08,
-    "flip_progress": 55.0,
-    "flip_axis_rate": 1.2,
-    "flip_progress_late_scale": 2.5,
-    "flip_completion_pressure": 2.2,
-    "flip_completion_pressure_late_scale": 1.2,
-    "flip_no_progress": 1.4,
-    "flip_no_progress_late_scale": 3.2,
-    "flip_altitude_progress": 18.0,
-    "flip_descent_progress": 18.0,
-    "flip_low_axis_rate": 1.8,
-    "flip_overrotate": 8.0,
-    "flip_low_altitude": 0.8,
-    "flip_low_altitude_descent": 0.9,
-    "flip_airtime_floor": 0.5,
-    "flip_descent_speed": 1.8,
-    "flip_descent_speed_sq": 0.16,
-    "flip_thrust_while_falling": 2.8,
-    "flip_no_thrust_while_falling": 2.8,
-    "flip_low_thrust_descent": 4.5,
-    "flip_low_altitude_low_thrust": 6.0,
-    "flip_rel_dist": 3.8,
-    "flip_rel_dist_sq": 1.4,
-    "flip_rel_progress": 16.0,
-    "flip_rel_away": 28.0,
-    "flip_rel_boundary_start": 1.0,
-    "flip_rel_boundary": 12.0,
-    "flip_rel_boundary_sq": 28.0,
-    "flip_horizontal_speed": 3.0,
-    "flip_horizontal_speed_sq": 0.35,
-    "flip_boundary_horizontal_speed": 6.0,
-    "flip_boundary_thrust": 28.0,
-    "flip_away_thrust": 42.0,
+    # SAC dense reward mode: small continuous shaping signals plus modest
+    # terminal safety costs. Milestone/progress-pressure rewards stay out.
+    "time_penalty": 0.01,
+    "failure_penalty": 150.0,  # Increased from 25.0 to suppress spin exploit
+    "success_bonus": 200.0,     # Increased from 50.0 to balance high failure penalty
+    "fail_penalty": 150.0,     # Increased from 25.0 to match failure_penalty
     "flip_rel_dist_limit": 5.0,
-    "flip_xy_escape_penalty": 120.0,
-    "flip_surface_contact_penalty": 160.0,
-    "flip_high_angular_speed": 0.4,
-    "flip_axis_alignment": 3.0,
-    "flip_axis_alignment_progress_start": 0.08,
-    "flip_off_axis": 0.45,
-    "flip_joint_speed": 0.05,
-    "flip_side_deviation": 1.0,
-    "flip_late_angular_speed": 0.18,
-    "flip_body_spin": 0.12,
-    "flip_world_z_spin": 0.35,
-    "flip_completion_bonus": 30.0,
+    "flip_xy_escape_penalty": 100.0,         # Increased from 30.0
+    "flip_surface_contact_penalty": 120.0,   # Increased from 40.0
 
-    "recovery_linear_speed": 0.45,
-    "recovery_angular_speed": 0.45,
-    "recovery_joint_speed": 0.09,
-    "recovery_upright": 8.0,
-    "recovery_flip_progress": 8.0,
-    "recovery_overrotate": 0.0,
-    "recovery_rel_dist": 8.0,
-    "recovery_rel_progress": 12.0,
-    "recovery_low_altitude": 0.0,
-    "recovery_upward_speed": 0.0,
-    "recovery_downward_speed": 0.0,
-    "recovery_falling_thrust": 0.0,
-    "recovery_target_closing_speed": 0.0,
-    "recovery_thrust_alignment": 0.0,
-    "recovery_height_error": 0.0,
-    "recovery_altitude_progress": 0.0,
-    "recovery_below_hover_band": 0.0,
-    "recovery_ground_stall": 0.0,
-    "recovery_upright_climb": 0.0,
-    "hover_low_altitude": 0.0,
-    "hover_upward_speed": 0.0,
-    "hover_falling_thrust": 0.0,
-    "hover_linear_speed": 0.45,
-    "hover_angular_speed": 0.45,
-    "hover_joint_speed": 0.09,
-    "hover_upright": 8.0,
-    "hover_rel_dist": 8.0,
-    "hover_height_error": 0.0,
-    "hover_vertical_speed": 0.0,
-    "phase_climb_to_flip_bonus": 50.0,
-    "phase_flip_to_recovery_bonus": 150.0,
-    "phase_recovery_to_hover_bonus": 100.0,
+    "dense_position": 1.0,
+    "dense_height": 0.8,
+    "dense_upright": 0.7,
+    "dense_velocity": 0.5,
+    "dense_flip_axis": 2.0,
+    "dense_flip_upright_recovery": 1.8,
+    "dense_hover_stability": 1.0,
+    "dense_flip_progress_delta": 8.0,
+    "dense_drift": 0.45,
+    "dense_angular": 0.25,
+    "dense_off_axis": 0.45,
+    "dense_yaw_spin": 0.65,
+    "dense_control_effort": 0.05,
+    "dense_action_smoothness": 0.08,
+    "dense_safety": 3.0,                     # Increased from 1.2 to penalize low altitude during flip more heavily
+    "dense_overrotate": 2.5,                 # Increased from 1.6 to prevent multiple spins
 }
+ENV_KWARGS = {
+    "reward_mode": "dense",
+    "include_task_state_observation": True,  # Enabled to give agent visibility of phases and flip progress
+}
+
+
+def parse_ent_coef(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
 
 
 def train(args):
@@ -119,9 +58,14 @@ def train(args):
         "train_freq": 1,
         "gradient_steps": 1,
         "learning_starts": args.learning_starts,
+        "ent_coef": parse_ent_coef(args.sac_ent_coef),
     }
-    train_loop(args, ALGO_NAME, SAC, BaseCallback, model_kwargs, REWARD_WEIGHTS)
+    train_loop(args, ALGO_NAME, SAC, BaseCallback, model_kwargs, REWARD_WEIGHTS, ENV_KWARGS)
 
 
 def watch(args):
-    watch_model(args, ALGO_NAME, SAC, REWARD_WEIGHTS)
+    watch_model(args, ALGO_NAME, SAC, REWARD_WEIGHTS, ENV_KWARGS)
+
+
+def evaluate(args):
+    evaluate_model(args, ALGO_NAME, SAC, REWARD_WEIGHTS, ENV_KWARGS)

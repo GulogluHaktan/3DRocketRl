@@ -5,7 +5,7 @@ from stable_baselines3 import TD3
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.noise import NormalActionNoise
 
-from rl_common import train_loop, watch_model
+from rl_common import evaluate_model, train_loop, watch_model
 
 
 ALGO_NAME = "td3"
@@ -178,3 +178,7 @@ def train(args):
 
 def watch(args):
     watch_model(args, ALGO_NAME, TD3, REWARD_WEIGHTS, ENV_KWARGS)
+
+
+def evaluate(args):
+    evaluate_model(args, ALGO_NAME, TD3, REWARD_WEIGHTS, ENV_KWARGS)

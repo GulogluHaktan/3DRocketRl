@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import csv
+import glob
 import time
 from pathlib import Path
 
 import numpy as np
 
-from hopper_env import HopperEnv
+from hopper_env import HopperEnv, REWARD_BREAKDOWN_KEYS
 from telegram_notifier import TelegramNotifier
 
 
@@ -45,6 +46,8 @@ EXTRA_INFO_KEYS = (
     "physics_angular_speed_delta",
     "height",
     "main_thrust_newton",
+    "reward_mode",
+    *REWARD_BREAKDOWN_KEYS,
 )
 
 
@@ -434,6 +437,162 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
         if csv_file is not None:
             csv_file.close()
         env.close_viewer()
+
+
+def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None):
+    env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+    observation_names = tuple(env.observation_names)
+    model_paths = resolve_eval_model_paths(args, algo_name)
+    csv_file = None
+    writer = None
+
+    if args.csv:
+        csv_path = Path(args.csv)
+        csv_file = csv_path.open("w", newline="")
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=(
+                "model",
+                "episode",
+                "step",
+                "reward",
+                "episode_reward",
+                "episode_length",
+                "done",
+                *observation_names,
+                *EXTRA_INFO_KEYS,
+            ),
+        )
+        writer.writeheader()
+
+    summaries = []
+    try:
+        for model_path in model_paths:
+            model_path = Path(model_path)
+            model = Algorithm.load(model_path, env=env, device="cpu")
+            model_summaries = []
+            for episode_index in range(1, args.episodes + 1):
+                obs, _ = env.reset()
+                episode_reward = 0.0
+                max_flip_progress = 0.0
+                max_axis_rate = 0.0
+                max_rel_dist = 0.0
+                min_height = float("inf")
+                final_info = {}
+                final_step = 0
+                for step_count in range(1, args.max_steps + 1):
+                    action, _ = model.predict(obs, deterministic=True)
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    reward = float(reward)
+                    episode_reward += reward
+                    done = bool(terminated or truncated)
+                    max_flip_progress = max(max_flip_progress, float(info.get("flip_progress", 0.0)))
+                    max_axis_rate = max(max_axis_rate, float(info.get("positive_flip_axis_rate", 0.0)))
+                    max_rel_dist = max(max_rel_dist, float(info.get("rel_dist", 0.0)))
+                    min_height = min(min_height, float(info.get("height", 0.0)))
+                    final_info = info
+                    final_step = step_count
+
+                    if writer is not None:
+                        row = {
+                            "model": str(model_path),
+                            "episode": episode_index,
+                            "step": step_count,
+                            "reward": reward,
+                            "episode_reward": episode_reward,
+                            "episode_length": step_count,
+                            "done": done,
+                        }
+                        for key in observation_names:
+                            row[key] = info.get(key, "")
+                        for key in EXTRA_INFO_KEYS:
+                            row[key] = info.get(key, "")
+                        writer.writerow(row)
+
+                    if done:
+                        break
+
+                if csv_file is not None:
+                    csv_file.flush()
+
+                summary = {
+                    "model": str(model_path),
+                    "episode": episode_index,
+                    "steps": final_step,
+                    "reward": round(episode_reward, 3),
+                    "phase": final_info.get("phase"),
+                    "success": final_info.get("success"),
+                    "fail": final_info.get("fail"),
+                    "fail_reason": final_info.get("fail_reason"),
+                    "max_flip_progress": round(max_flip_progress, 3),
+                    "final_flip_progress": round(float(final_info.get("flip_progress", 0.0)), 3),
+                    "max_axis_rate": round(max_axis_rate, 3),
+                    "max_rel_dist": round(max_rel_dist, 3),
+                    "min_height": round(min_height, 3),
+                    "final_height": round(float(final_info.get("height", 0.0)), 3),
+                    "final_rel_dist": round(float(final_info.get("rel_dist", 0.0)), 3),
+                    "overrotate_penalty": round(float(final_info.get("penalty_overrotate", 0.0)), 3),
+                }
+                summaries.append(summary)
+                model_summaries.append(summary)
+                print("Eval episode:", summary, flush=True)
+
+            print_eval_summary("Eval model summary", model_summaries)
+
+        if summaries:
+            print_eval_summary("Eval summary", summaries)
+    finally:
+        if csv_file is not None:
+            csv_file.close()
+        env.close()
+
+
+def resolve_eval_model_paths(args, algo_name):
+    if args.models_glob:
+        model_paths = [Path(path) for path in sorted(glob.glob(args.models_glob))]
+    elif args.run_dir:
+        run_dir = Path(args.run_dir)
+        checkpoint_paths = sorted(
+            (run_dir / "checkpoints").glob(f"{algo_name}_hopper_*.zip"),
+            key=lambda path: checkpoint_step(path, algo_name),
+        )
+        latest_path = run_dir / f"{algo_name}_hopper_latest.zip"
+        model_paths = checkpoint_paths or ([latest_path] if latest_path.exists() else [])
+    else:
+        model_paths = [Path(args.model or f"{algo_name}_hopper_latest.zip")]
+
+    model_paths = [path for path in model_paths if path.exists()]
+    if not model_paths:
+        raise FileNotFoundError("Eval icin model bulunamadi.")
+    return model_paths
+
+
+def checkpoint_step(path, algo_name):
+    stem = path.stem
+    prefix = f"{algo_name}_hopper_"
+    suffix = stem[len(prefix):] if stem.startswith(prefix) else stem
+    return int(suffix) if suffix.isdigit() else 10**18
+
+
+def print_eval_summary(label, summaries):
+    if not summaries:
+        return
+    successes = sum(1 for item in summaries if item["success"])
+    print(
+        f"{label}:",
+        {
+            "models": len({item["model"] for item in summaries}),
+            "episodes": len(summaries),
+            "successes": successes,
+            "best_flip_progress": max(item["max_flip_progress"] for item in summaries),
+            "avg_reward": round(sum(item["reward"] for item in summaries) / len(summaries), 3),
+            "fail_reasons": {
+                reason: sum(1 for item in summaries if item["fail_reason"] == reason)
+                for reason in sorted({item["fail_reason"] for item in summaries})
+            },
+        },
+        flush=True,
+    )
 
 
 def read_step_rows(run_dir):

@@ -52,6 +52,7 @@ def add_train_args(parser):
     parser.add_argument("--buffer-size", type=int, default=300_000)
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--learning-starts", type=int, default=5_000)
+    parser.add_argument("--sac-ent-coef", default="auto_0.02")
 
     # PPO args.
     parser.add_argument("--n-steps", type=int, default=2048)
@@ -70,6 +71,18 @@ def add_watch_args(parser):
     parser.set_defaults(fixed_start_z=True)
 
 
+def add_eval_args(parser):
+    parser.add_argument("--algo", choices=sorted(ALGORITHMS), default="sac")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--models-glob", default=None)
+    parser.add_argument("--run-dir", default=None)
+    parser.add_argument("--episodes", type=int, default=3)
+    parser.add_argument("--max-steps", type=int, default=1200)
+    parser.add_argument("--csv", default=None)
+    add_env_args(parser)
+    parser.set_defaults(fixed_start_z=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -80,6 +93,9 @@ def main():
     watch_parser = sub.add_parser("watch")
     add_watch_args(watch_parser)
 
+    eval_parser = sub.add_parser("eval")
+    add_eval_args(eval_parser)
+
     plot_parser = sub.add_parser("plot")
     plot_parser.add_argument("run_dir")
 
@@ -89,6 +105,8 @@ def main():
         load_algo(args.algo).train(args)
     elif args.mode == "watch":
         load_algo(args.algo).watch(args)
+    elif args.mode == "eval":
+        load_algo(args.algo).evaluate(args)
     elif args.mode == "plot":
         plot_run(args.run_dir)
 

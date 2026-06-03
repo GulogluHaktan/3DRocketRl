@@ -56,6 +56,26 @@ BAD_PHYSICS_SPEED_JUMP_LIMIT = 1000.0
 BAD_PHYSICS_EMERGENCY_SPEED_LIMIT = 10000.0
 
 
+REWARD_BREAKDOWN_KEYS = (
+    "reward_dense_total",
+    "reward_position_score",
+    "reward_height_score",
+    "reward_upright_score",
+    "reward_velocity_score",
+    "reward_flip_axis_score",
+    "reward_flip_upright_recovery_score",
+    "reward_hover_stability_score",
+    "penalty_drift",
+    "penalty_angular",
+    "penalty_off_axis",
+    "penalty_yaw_spin",
+    "penalty_control_effort",
+    "penalty_action_smoothness",
+    "penalty_safety",
+    "penalty_overrotate",
+)
+
+
 REWARD_WEIGHT_KEYS = (
     "time_penalty",
     "failure_penalty",
@@ -149,6 +169,22 @@ REWARD_WEIGHT_KEYS = (
     "phase_climb_to_flip_bonus",
     "phase_flip_to_recovery_bonus",
     "phase_recovery_to_hover_bonus",
+    "dense_position",
+    "dense_height",
+    "dense_upright",
+    "dense_velocity",
+    "dense_flip_axis",
+    "dense_flip_upright_recovery",
+    "dense_hover_stability",
+    "dense_flip_progress_delta",
+    "dense_drift",
+    "dense_angular",
+    "dense_off_axis",
+    "dense_yaw_spin",
+    "dense_control_effort",
+    "dense_action_smoothness",
+    "dense_safety",
+    "dense_overrotate",
     "fail_penalty",
 )
 
@@ -178,6 +214,7 @@ class HopperEnv(gym.Env):
         min_start_z: float = 0.5,
         max_start_z: float = 10.0,
         start_phase: str = "climb",
+        reward_mode: str = "legacy",
         reward_weights: dict[str, float] | None = None,
         include_task_state_observation: bool = False,
         use_corrected_flip_low_altitude_penalty: bool = False,
@@ -216,6 +253,8 @@ class HopperEnv(gym.Env):
         super().__init__()
         if start_phase not in {"climb", "flip"}:
             raise ValueError("start_phase must be 'climb' or 'flip'")
+        if reward_mode not in {"legacy", "dense"}:
+            raise ValueError("reward_mode must be 'legacy' or 'dense'")
         self.model = mujoco.MjModel.from_xml_path(str(MODEL_XML))
         self.data = mujoco.MjData(self.model)
         self.body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hopper")
@@ -238,6 +277,7 @@ class HopperEnv(gym.Env):
         self.min_start_z = float(min_start_z)
         self.max_start_z = float(max_start_z)
         self.start_phase = start_phase
+        self.reward_mode = reward_mode
         self.target_pos = np.asarray(target_pos, dtype=np.float64)
         if hover_target_z is not None:
             self.target_pos[2] = float(hover_target_z)
@@ -341,6 +381,8 @@ class HopperEnv(gym.Env):
         self.last_physics_angular_speed = 0.0
         self.physics_linear_speed_delta = 0.0
         self.physics_angular_speed_delta = 0.0
+        self.last_action = np.zeros(3, dtype=np.float32)
+        self.last_reward_breakdown = self._empty_reward_breakdown()
 
         self.action_space = spaces.Box(
             low=np.array([0.0, -1.0, -1.0], dtype=np.float32),
@@ -374,6 +416,8 @@ class HopperEnv(gym.Env):
         self.last_metrics = None
         self.last_height = 0.0
         self.last_transition_bonus = 0.0
+        self.last_action = np.zeros(3, dtype=np.float32)
+        self.last_reward_breakdown = self._empty_reward_breakdown()
         if self.random_start_z:
             self.current_start_z = float(self.np_random.uniform(self.min_start_z, self.max_start_z))
         else:
@@ -407,6 +451,7 @@ class HopperEnv(gym.Env):
         self.physics_linear_speed_delta = 0.0
         self.physics_angular_speed_delta = 0.0
         action = np.clip(np.asarray(action, dtype=np.float32), self.action_space.low, self.action_space.high)
+        current_action = action.copy()
         main = float(action[0])
         yaw_ctrl = float(self.max_tvc_angle * action[1])
         pitch_ctrl = float(self.max_tvc_angle * action[2])
@@ -425,10 +470,11 @@ class HopperEnv(gym.Env):
             if self._has_bad_physics():
                 bad_physics = True
                 break
-            if self.viewer is not None:
-                self._update_viewer_camera()
-                self.viewer.sync()
-                time.sleep(self.model.opt.timestep)
+
+        if self.viewer is not None and not bad_physics:
+            self._update_viewer_camera()
+            self.viewer.sync()
+            time.sleep(self.model.opt.timestep * self.frame_skip)
 
         if bad_physics:
             self.fail = True
@@ -442,12 +488,17 @@ class HopperEnv(gym.Env):
         self._update_flip_progress()
         metrics = self._compute_metrics()
         self.last_metrics = metrics
-        reward, fail = self._compute_phase_reward(metrics)
+        if self.reward_mode == "dense":
+            reward, fail = self._compute_dense_reward(metrics, current_action)
+        else:
+            self.last_reward_breakdown = self._empty_reward_breakdown()
+            reward, fail = self._compute_phase_reward(metrics)
         fail = fail or self._check_fail_conditions(metrics)
         self.fail = bool(fail)
         if self.fail and not self.fail_reason:
             self.fail_reason = self._infer_fail_reason(metrics)
-        self.last_transition_bonus = self._update_phase(metrics)
+        transition_bonus = self._update_phase(metrics)
+        self.last_transition_bonus = 0.0 if self.reward_mode == "dense" else transition_bonus
         reward += self.last_transition_bonus
         terminated = bool(self.fail or self.success)
         if self.fail:
@@ -466,6 +517,7 @@ class HopperEnv(gym.Env):
         self.last_rel_dist = metrics["rel_dist"]
         self.last_vertical_velocity = metrics["vertical_velocity"]
         self.last_height = metrics["z"]
+        self.last_action = current_action
         return obs, float(reward), terminated, truncated, self.get_info()
 
     def get_observation(self):
@@ -503,6 +555,7 @@ class HopperEnv(gym.Env):
         info = dict(zip(self.observation_names, self.get_observation().tolist()))
         metrics = self.last_metrics if self.last_metrics is not None else self._compute_metrics()
         info.update({
+            "reward_mode": self.reward_mode,
             "phase": self.current_phase,
             "success": self.success,
             "fail": self.fail,
@@ -535,6 +588,7 @@ class HopperEnv(gym.Env):
             "height": float(metrics["z"]),
             "main_thrust_newton": float(self.main_motor_power * self.max_thrust),
         })
+        info.update(self.last_reward_breakdown)
         return info
 
     def _update_thrust_sensors(self):
@@ -743,6 +797,99 @@ class HopperEnv(gym.Env):
             self.flip_angle += flip_rate * dt
             self.flip_progress = self.flip_angle / FULL_FLIP_RAD
             self.last_flip_progress_delta = float(flip_rate * dt / FULL_FLIP_RAD)
+
+    def _empty_reward_breakdown(self):
+        return {key: 0.0 for key in REWARD_BREAKDOWN_KEYS}
+
+    def _compute_dense_reward(self, metrics, action):
+        breakdown = self._compute_dense_breakdown(metrics, action)
+        self.last_reward_breakdown = breakdown
+        return breakdown["reward_dense_total"], False
+
+    def _compute_dense_breakdown(self, metrics, action):
+        rw = self.reward_weights
+        z = metrics["z"]
+        rel_dist = metrics["rel_dist"]
+        v = metrics["v"]
+        w = metrics["w"]
+        target_z = self.flip_target_z if self.current_phase in {"climb", "flip"} else float(self.target_pos[2])
+        height_error = abs(z - target_z)
+        upright_score = float(np.clip((metrics["upright_score"] + 1.0) * 0.5, 0.0, 1.0))
+        position_score = float(np.exp(-((rel_dist / 2.0) ** 2)))
+        height_score = float(np.exp(-((height_error / 3.0) ** 2)))
+        velocity_score = float(np.exp(-((v / 6.0) ** 2)))
+        flip_progress = float(max(self.flip_progress, 0.0))
+
+        flip_phase = 1.0 if self.current_phase == "flip" else 0.0
+        hover_phase = 1.0 if self.current_phase in {"recovery", "hover"} else 0.0
+        non_flip_phase = 1.0 - flip_phase
+        position_phase_scale = 0.2 if self.current_phase == "flip" else 1.0
+        height_phase_scale = 0.25 if self.current_phase == "flip" else 1.0
+        velocity_phase_scale = 0.12 if self.current_phase == "flip" else 1.0
+        positive_axis_rate = metrics["positive_flip_axis_rate"]
+        off_axis_speed = metrics["off_axis_angular_speed"]
+        yaw_spin = abs(metrics["world_z_spin"])
+        flip_axis_purity = positive_axis_rate / max(positive_axis_rate + off_axis_speed + yaw_spin, 1e-8)
+        flip_axis_activity = float(np.tanh(positive_axis_rate / 6.0))
+        flip_axis_score = float(flip_phase * flip_axis_purity * flip_axis_activity)
+        flip_progress_delta_score = float(flip_phase * max(self.last_flip_progress_delta, 0.0))
+        flip_recovery_gate = float(np.clip((flip_progress - 0.65) / 0.35, 0.0, 1.0) ** 2)
+        flip_upright_recovery_score = float(
+            flip_phase
+            * flip_recovery_gate
+            * upright_score
+            * np.exp(-((w / 5.0) ** 2))
+            * np.exp(-((rel_dist / 1.5) ** 2))
+        )
+
+        hover_height_score = float(np.exp(-((abs(z - float(self.target_pos[2])) / 1.5) ** 2)))
+        hover_velocity_score = float(np.exp(-((v / 3.0) ** 2)))
+        hover_angular_score = float(np.exp(-((w / 3.0) ** 2)))
+        hover_stability_score = float(
+            hover_phase * upright_score * hover_height_score * hover_velocity_score * hover_angular_score
+        )
+
+        drift_penalty = float(rel_dist / (rel_dist + 2.0))
+        late_flip_spin_scale = 1.0 + 2.5 * flip_phase * flip_recovery_gate
+        angular_penalty = float((w * w) / (w * w + 25.0) * late_flip_spin_scale)
+        off_axis_penalty = float(off_axis_speed / (off_axis_speed + 5.0))
+        yaw_spin_penalty = float(yaw_spin / (yaw_spin + 3.0))
+        control_effort_penalty = float(np.mean(np.square(action)))
+        action_smoothness_penalty = float(np.mean(np.square(action - self.last_action)))
+        safety_floor = 4.0 if self.current_phase == "flip" else 1.0
+        low_altitude_penalty = np.clip((safety_floor - z) / max(safety_floor, 1e-8), 0.0, 1.0) ** 2
+        high_altitude_penalty = 0.0
+        if self.current_phase == "flip":
+            high_altitude_penalty = np.clip((z - 12.0) / 6.0, 0.0, 1.0) ** 2
+        safety_penalty = float(max(low_altitude_penalty, high_altitude_penalty))
+        overrotate_error = max(flip_progress - 1.0, 0.0)
+        overrotate_penalty = float(flip_phase * overrotate_error / (overrotate_error + 0.35))
+
+        breakdown = self._empty_reward_breakdown()
+        breakdown["reward_position_score"] = rw["dense_position"] * position_score * position_phase_scale
+        breakdown["reward_height_score"] = rw["dense_height"] * height_score * height_phase_scale
+        breakdown["reward_upright_score"] = rw["dense_upright"] * upright_score * non_flip_phase
+        breakdown["reward_velocity_score"] = rw["dense_velocity"] * velocity_score * velocity_phase_scale
+        breakdown["reward_flip_axis_score"] = (
+            rw["dense_flip_axis"] * flip_axis_score
+            + rw["dense_flip_progress_delta"] * flip_progress_delta_score
+        )
+        breakdown["reward_flip_upright_recovery_score"] = (
+            rw["dense_flip_upright_recovery"] * flip_upright_recovery_score
+        )
+        breakdown["reward_hover_stability_score"] = rw["dense_hover_stability"] * hover_stability_score
+        breakdown["penalty_drift"] = -rw["dense_drift"] * drift_penalty
+        breakdown["penalty_angular"] = -rw["dense_angular"] * angular_penalty
+        breakdown["penalty_off_axis"] = -rw["dense_off_axis"] * off_axis_penalty
+        breakdown["penalty_yaw_spin"] = -rw["dense_yaw_spin"] * yaw_spin_penalty
+        breakdown["penalty_control_effort"] = -rw["dense_control_effort"] * control_effort_penalty
+        breakdown["penalty_action_smoothness"] = -rw["dense_action_smoothness"] * action_smoothness_penalty
+        breakdown["penalty_safety"] = -rw["dense_safety"] * safety_penalty
+        breakdown["penalty_overrotate"] = -rw["dense_overrotate"] * overrotate_penalty
+        breakdown["reward_dense_total"] = float(sum(
+            value for key, value in breakdown.items() if key != "reward_dense_total"
+        ))
+        return breakdown
 
     def _compute_phase_reward(self, metrics):
         if self.current_phase == "climb":

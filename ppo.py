@@ -3,7 +3,7 @@ from __future__ import annotations
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
-from rl_common import train_loop, watch_model
+from rl_common import evaluate_model, train_loop, watch_model
 
 
 ALGO_NAME = "ppo"
@@ -27,3 +27,7 @@ def train(args):
 
 def watch(args):
     watch_model(args, ALGO_NAME, PPO, REWARD_WEIGHTS)
+
+
+def evaluate(args):
+    evaluate_model(args, ALGO_NAME, PPO, REWARD_WEIGHTS)
