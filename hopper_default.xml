@@ -4,8 +4,8 @@
     
     <option gravity="0 0 -9.81"
             timestep="0.002"
-            integrator="RK4"
-            iterations="50"/>
+            integrator="implicitfast"
+            iterations="80"/>
 
     <visual>
         <headlight ambient="0.5 0.5 0.5"/>
@@ -36,7 +36,9 @@
               pos="0 0 0"
               size="20 20 0.1"
               rgba="0.3 0.3 0.3 1"
-              friction="1.2 0.1 0.1"/>
+              friction="1.2 0.1 0.1"
+              solref="0.02 1"
+              solimp="0.9 0.95 0.001"/>
 
         <!-- ================================================= -->
         <!-- LANDING PAD -->
@@ -50,7 +52,9 @@
                   size="0.5 0.01"
                   material="pad_mat"
                   contype="1"
-                  conaffinity="1"/>
+                  conaffinity="1"
+                  solref="0.02 1"
+                  solimp="0.9 0.95 0.001"/>
         </body>
 
         <!-- ================================================= -->
@@ -125,7 +129,9 @@
                   size="0.025"
                   material="foot_mat"
                   contype="1"
-                  conaffinity="1"/>
+                  conaffinity="1"
+                  solref="0.02 1"
+                  solimp="0.9 0.95 0.001"/>
 
             <site name="foot1"
                   pos="0.4 0 -0.355"
@@ -147,7 +153,9 @@
                   size="0.025"
                   material="foot_mat"
                   contype="1"
-                  conaffinity="1"/>
+                  conaffinity="1"
+                  solref="0.02 1"
+                  solimp="0.9 0.95 0.001"/>
 
             <site name="foot2"
                   pos="-0.4 0 -0.355"
@@ -169,7 +177,9 @@
                   size="0.025"
                   material="foot_mat"
                   contype="1"
-                  conaffinity="1"/>
+                  conaffinity="1"
+                  solref="0.02 1"
+                  solimp="0.9 0.95 0.001"/>
 
             <site name="foot3"
                   pos="0 0.4 -0.355"
@@ -191,7 +201,9 @@
                   size="0.025"
                   material="foot_mat"
                   contype="1"
-                  conaffinity="1"/>
+                  conaffinity="1"
+                  solref="0.02 1"
+                  solimp="0.9 0.95 0.001"/>
 
             <site name="foot4"
                   pos="0 -0.4 -0.355"
@@ -217,13 +229,13 @@
                         diaginertia="0.001 0.001 0.001"/>
 
                 <!-- YAW -->
-                  <joint name="tvc_yaw_joint"
-                        type="hinge"
-                        axis="1 0 0"
-                        range="-25 25"
-                        damping="2"
-                        armature="0.01"
-                        frictionloss="0.02"/>
+<joint name="tvc_yaw_joint"
+                      type="hinge"
+                      axis="1 0 0"
+                      range="-25 25"
+                      damping="0.1" 
+                      armature="0.002"
+                      frictionloss="0.005"/>
 
                 <body name="tvc_pitch">
 
@@ -232,13 +244,13 @@
                               diaginertia="0.0002 0.0002 0.0002"/>
 
                     <!-- PITCH -->
-                    <joint name="tvc_pitch_joint"
+<joint name="tvc_pitch_joint"
                         type="hinge"
                         axis="0 1 0"
                         range="-25 25"
-                        damping="2"
-                        armature="0.01"
-                        frictionloss="0.02"/>
+                        damping="0.1"
+                        armature="0.002"
+                        frictionloss="0.005"/>
 
                     <!-- ENGINE -->
                     <geom name="engine"
@@ -266,16 +278,16 @@
     <!-- ACTUATORS -->
     <!-- ================================================= -->
 
-    <actuator>
-
+<actuator>
         <position joint="tvc_yaw_joint"
                   kp="10"
-                  ctrlrange="-25 25"/>
+                  ctrlrange="-25 25"
+                  forcerange="-2.5 2.5"/>
 
         <position joint="tvc_pitch_joint"
                   kp="10"
-                  ctrlrange="-25 25"/>
-
+                  ctrlrange="-25 25"
+                  forcerange="-2.5 2.5"/>
     </actuator>
 
 </mujoco>

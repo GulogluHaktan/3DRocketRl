@@ -4,6 +4,9 @@ __pycache__/
 venv/
 env/
 .env
+.env.*
+telegram_secrets.json
+telegram_*.secret.json
 
 MUJOCO_LOG.TXT
 *.log
@@ -15,7 +18,12 @@ model_backups/
 archive_unused/
 __pycache__/
 *.pyc
-ppo_*.zip
+*_hopper_*.zip
+*.csv
+*.tmp
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 
 .idea/
 .vscode/

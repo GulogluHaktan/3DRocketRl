@@ -26,8 +26,10 @@ def load_algo(name):
 def add_env_args(parser):
     parser.add_argument("--start-z", type=float, default=10.0)
     parser.add_argument("--fixed-start-z", action="store_true")
+    parser.add_argument("--random-start-z", action="store_true")
     parser.add_argument("--min-start-z", type=float, default=0.5)
     parser.add_argument("--max-start-z", type=float, default=10.0)
+    parser.add_argument("--start-phase", choices=("climb", "flip"), default="climb")
     parser.add_argument("--max-thrust", type=float, default=None)
     parser.add_argument("--max-tvc-deg", type=float, default=20.0)
 
@@ -39,9 +41,12 @@ def add_train_args(parser):
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--telegram-config", default="telegram_secrets.json")
+    parser.add_argument("--telegram-every", type=int, default=10_000)
+    parser.add_argument("--no-telegram", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gamma", type=float, default=0.97)
 
     # SAC/TD3 args.
     parser.add_argument("--buffer-size", type=int, default=300_000)
@@ -62,6 +67,7 @@ def add_watch_args(parser):
     parser.add_argument("--model", default=None)
     parser.add_argument("--csv", default=None)
     add_env_args(parser)
+    parser.set_defaults(fixed_start_z=True)
 
 
 def main():

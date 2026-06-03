@@ -42,35 +42,68 @@ OBSERVATION_NAMES = (
 
 PHASES = ("climb", "flip", "recovery", "hover", "done")
 FULL_FLIP_RAD = 2.0 * np.pi
+BAD_PHYSICS_SPEED_JUMP_LIMIT = 1000.0
+BAD_PHYSICS_EMERGENCY_SPEED_LIMIT = 10000.0
 
 
 DEFAULT_REWARD_WEIGHTS = {
+    "time_penalty": 0.0,
+    "failure_penalty": 1000.0,
+    "success_bonus": 2500.0,
     "climb_z_error": 1.5,
     "climb_high_z": 0.5,
-    "climb_low_altitude": 1.0,
-    "climb_low_altitude_sq": 0.5,
     "climb_x": 1.15,
     "climb_y": 1.25,
-    "climb_rel_dist_sq": 1.5,
     "climb_angular_speed": 2.0,
     "climb_joint_speed": 0.09,
     "climb_upright": 15.0,
     "climb_speed": 3.4,
-    "flip_height_error": 0.35,
-    "flip_progress": 35.0,
-    "flip_stall": 0.35,
-    "flip_overrotate": 1.0,
+    "flip_height_reward": 0.25,
+    "flip_progress": 120.0,
+    "flip_axis_rate": 4.0,
+    "flip_progress_late_scale": 4.0,
+    "flip_completion_pressure": 14.0,
+    "flip_completion_pressure_late_scale": 2.5,
+    "flip_no_progress": 10.0,
+    "flip_no_progress_late_scale": 5.0,
+    "flip_altitude_progress": 45.0,
+    "flip_descent_progress": 35.0,
+    "flip_low_axis_rate": 2.5,
+    "flip_overrotate": 35.0,
     "flip_low_altitude": 2.5,
-    "flip_upright_change": 30.0,
+    "flip_low_altitude_descent": 0.85,
+    "flip_airtime_floor": 1.4,
+    "flip_descent_speed": 3.5,
+    "flip_descent_speed_sq": 0.35,
+    "flip_thrust_while_falling": 2.0,
+    "flip_no_thrust_while_falling": 2.0,
+    "flip_low_thrust_descent": 4.0,
+    "flip_low_altitude_low_thrust": 6.0,
+    "flip_rel_dist": 4.0,
+    "flip_rel_dist_sq": 1.5,
+    "flip_rel_progress": 15.0,
+    "flip_rel_away": 35.0,
+    "flip_rel_boundary_start": 1.0,
+    "flip_rel_boundary": 20.0,
+    "flip_rel_boundary_sq": 55.0,
+    "flip_horizontal_speed": 2.0,
+    "flip_horizontal_speed_sq": 0.5,
+    "flip_boundary_horizontal_speed": 8.0,
+    "flip_boundary_thrust": 45.0,
+    "flip_away_thrust": 65.0,
+    "flip_rel_dist_limit": 5.0,
+    "flip_xy_escape_penalty": 250.0,
+    "flip_surface_contact_penalty": 300.0,
     "flip_high_angular_speed": 1.0,
     "flip_axis_alignment": 8.0,
+    "flip_axis_alignment_progress_start": 0.08,
     "flip_off_axis": 0.65,
     "flip_joint_speed": 0.12,
     "flip_side_deviation": 3.0,
-    "flip_rel_dist": 3.0,
-    "flip_rel_dist_sq": 1.5,
     "flip_late_angular_speed": 0.45,
     "flip_body_spin": 0.35,
+    "flip_world_z_spin": 0.45,
+    "flip_completion_bonus": 200.0,
     "recovery_linear_speed": 1.5,
     "recovery_angular_speed": 1.45,
     "recovery_joint_speed": 0.09,
@@ -98,9 +131,12 @@ class HopperEnv(gym.Env):
         random_start_z: bool = True,
         min_start_z: float = 0.5,
         max_start_z: float = 10.0,
+        start_phase: str = "climb",
         reward_weights: dict[str, float] | None = None,
     ):
         super().__init__()
+        if start_phase not in {"climb", "flip"}:
+            raise ValueError("start_phase must be 'climb' or 'flip'")
         self.model = mujoco.MjModel.from_xml_path(str(MODEL_XML))
         self.data = mujoco.MjData(self.model)
         self.body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hopper")
@@ -122,6 +158,7 @@ class HopperEnv(gym.Env):
         self.random_start_z = bool(random_start_z)
         self.min_start_z = float(min_start_z)
         self.max_start_z = float(max_start_z)
+        self.start_phase = start_phase
         self.target_pos = np.asarray(target_pos, dtype=np.float64)
         self.reward_weights = DEFAULT_REWARD_WEIGHTS.copy()
         if reward_weights:
@@ -146,14 +183,22 @@ class HopperEnv(gym.Env):
         self.flip_angle = 0.0
         self.flip_progress = 0.0
         self.last_step_flip_progress = 0.0
-        self.last_upright_score = 1.0
+        self.last_flip_progress_delta = 0.0
+        self.surface_contact = False
+        self.flip_surface_contact = False
         self.last_rel_dist = 0.0
+        self.last_vertical_velocity = 0.0
         self.hover_timer = 0.0
         self.success = False
         self.fail = False
         self.fail_reason = ""
         self.current_start_z = self.start_z
-        self.last_phase_bonus = 0.0
+        self.last_metrics = None
+        self.last_transition_bonus = 0.0
+        self.last_physics_linear_speed = 0.0
+        self.last_physics_angular_speed = 0.0
+        self.physics_linear_speed_delta = 0.0
+        self.physics_angular_speed_delta = 0.0
 
         self.action_space = spaces.Box(
             low=np.array([0.0, -1.0, -1.0], dtype=np.float32),
@@ -173,17 +218,16 @@ class HopperEnv(gym.Env):
         self.main_motor_power = 0.0
         self.tvc_yaw_cmd = 0.0
         self.tvc_pitch_cmd = 0.0
-        self.current_phase = "climb"
-        self.flip_angle = 0.0
-        self.flip_progress = 0.0
-        self.last_step_flip_progress = 0.0
-        self.last_upright_score = 1.0
+        self.current_phase = self.start_phase
+        self._reset_flip_tracking()
         self.last_rel_dist = 0.0
+        self.last_vertical_velocity = -0.1
         self.hover_timer = 0.0
         self.success = False
         self.fail = False
         self.fail_reason = ""
-        self.last_phase_bonus = 0.0
+        self.last_metrics = None
+        self.last_transition_bonus = 0.0
         if self.random_start_z:
             self.current_start_z = float(self.np_random.uniform(self.min_start_z, self.max_start_z))
         else:
@@ -196,23 +240,41 @@ class HopperEnv(gym.Env):
         self.data.qfrc_applied[:] = 0.0
         self.data.xfrc_applied[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
+        self._reset_physics_tracking()
         metrics = self._compute_metrics()
-        self.last_upright_score = metrics["upright_score"]
         self.last_rel_dist = metrics["rel_dist"]
+        self.last_vertical_velocity = metrics["vertical_velocity"]
+        self.last_metrics = metrics
         return self.get_observation(), {}
+
+    def _reset_flip_tracking(self):
+        self.flip_angle = 0.0
+        self.flip_progress = 0.0
+        self.last_step_flip_progress = 0.0
+        self.last_flip_progress_delta = 0.0
+        self.surface_contact = False
+        self.flip_surface_contact = False
 
     def step(self, action):
         self.step_count += 1
+        self.physics_linear_speed_delta = 0.0
+        self.physics_angular_speed_delta = 0.0
         action = np.clip(np.asarray(action, dtype=np.float32), self.action_space.low, self.action_space.high)
         main = float(action[0])
         yaw_ctrl = float(self.max_tvc_angle * action[1])
         pitch_ctrl = float(self.max_tvc_angle * action[2])
+        if self.current_phase == "flip":
+            yaw_ctrl = 0.0
         self.main_motor_power = main
 
         bad_physics = False
         for _ in range(self.frame_skip):
             self._apply_controls(main, yaw_ctrl, pitch_ctrl)
             mujoco.mj_step(self.model, self.data)
+            if self._has_surface_contact():
+                self.surface_contact = True
+                if self.current_phase == "flip":
+                    self.flip_surface_contact = True
             if self._has_bad_physics():
                 bad_physics = True
                 break
@@ -225,29 +287,37 @@ class HopperEnv(gym.Env):
             self.fail = True
             self.fail_reason = "bad_physics"
             self.current_phase = "done"
+            if np.all(np.isfinite(self.data.qpos)) and np.all(np.isfinite(self.data.qvel)):
+                self.last_metrics = self._compute_metrics()
             obs = self.get_observation()
-            return obs, -1000.0, True, False, self.get_info()
+            return obs, -self.reward_weights["failure_penalty"], True, False, self.get_info()
 
         self._update_flip_progress()
         metrics = self._compute_metrics()
+        self.last_metrics = metrics
         reward, fail = self._compute_phase_reward(metrics)
         fail = fail or self._check_fail_conditions(metrics)
         self.fail = bool(fail)
         if self.fail and not self.fail_reason:
             self.fail_reason = self._infer_fail_reason(metrics)
-        self.last_phase_bonus = self._update_phase(metrics)
-        reward += self.last_phase_bonus
+        self.last_transition_bonus = self._update_phase(metrics)
+        reward += self.last_transition_bonus
         terminated = bool(self.fail or self.success)
         if self.fail:
-            reward -= 1000.0
+            reward -= self.reward_weights["failure_penalty"]
+            if self.fail_reason == "flip_xy_escape":
+                reward -= self.reward_weights["flip_xy_escape_penalty"]
+            if self.fail_reason == "flip_surface_contact":
+                reward -= self.reward_weights["flip_surface_contact_penalty"]
         if self.success:
-            reward += 2500.0
+            reward += self.reward_weights["success_bonus"]
+        reward -= self.reward_weights["time_penalty"]
 
         obs = self.get_observation()
         truncated = self.step_count >= self.max_steps
         self.last_step_flip_progress = self.flip_progress
-        self.last_upright_score = metrics["upright_score"]
         self.last_rel_dist = metrics["rel_dist"]
+        self.last_vertical_velocity = metrics["vertical_velocity"]
         return obs, float(reward), terminated, truncated, self.get_info()
 
     def get_observation(self):
@@ -279,20 +349,34 @@ class HopperEnv(gym.Env):
 
     def get_info(self):
         info = dict(zip(OBSERVATION_NAMES, self.get_observation().tolist()))
-        metrics = self._compute_metrics()
+        metrics = self.last_metrics if self.last_metrics is not None else self._compute_metrics()
         info.update({
             "phase": self.current_phase,
             "success": self.success,
             "fail": self.fail,
             "fail_reason": self.fail_reason,
-            "phase_bonus": float(self.last_phase_bonus),
+            "transition_bonus": float(self.last_transition_bonus),
             "flip_progress": float(self.flip_progress),
+            "surface_contact": bool(self.surface_contact),
+            "flip_surface_contact": bool(self.flip_surface_contact),
             "hover_timer": float(self.hover_timer),
             "upright_score": float(metrics["upright_score"]),
             "rel_dist": float(metrics["rel_dist"]),
             "linear_speed": float(metrics["v"]),
+            "horizontal_speed": float(metrics["horizontal_speed"]),
             "angular_speed": float(metrics["w"]),
             "joint_speed": float(metrics["joint_speed"]),
+            "vertical_velocity": float(metrics["vertical_velocity"]),
+            "vertical_velocity_change": float(metrics["vertical_velocity_change"]),
+            "flip_progress_delta": float(self.last_flip_progress_delta),
+            "flip_axis_rate": float(metrics["flip_axis_rate"]),
+            "positive_flip_axis_rate": float(metrics["positive_flip_axis_rate"]),
+            "off_axis_angular_speed": float(metrics["off_axis_angular_speed"]),
+            "spin_about_body_axis": float(metrics["spin_about_body_axis"]),
+            "world_z_spin": float(metrics["world_z_spin"]),
+            "expected_axis_alignment": float(metrics["expected_axis_alignment"]),
+            "physics_linear_speed_delta": float(self.physics_linear_speed_delta),
+            "physics_angular_speed_delta": float(self.physics_angular_speed_delta),
             "height": float(metrics["z"]),
         })
         return info
@@ -304,6 +388,12 @@ class HopperEnv(gym.Env):
         ang_vel = self.data.qvel[3:6].copy()
         return pos, rot, lin_vel, ang_vel
 
+    def _reset_physics_tracking(self):
+        self.last_physics_linear_speed = float(np.linalg.norm(self.data.qvel[0:3]))
+        self.last_physics_angular_speed = float(np.linalg.norm(self.data.qvel[3:6]))
+        self.physics_linear_speed_delta = 0.0
+        self.physics_angular_speed_delta = 0.0
+
     def _has_bad_physics(self):
         if not np.all(np.isfinite(self.data.qpos)):
             return True
@@ -311,12 +401,25 @@ class HopperEnv(gym.Env):
             return True
         if not np.all(np.isfinite(self.data.qacc)):
             return True
-        if np.linalg.norm(self.data.qvel[0:3]) > 120.0:
+        linear_speed = float(np.linalg.norm(self.data.qvel[0:3]))
+        angular_speed = float(np.linalg.norm(self.data.qvel[3:6]))
+        linear_delta = abs(linear_speed - self.last_physics_linear_speed)
+        angular_delta = abs(angular_speed - self.last_physics_angular_speed)
+        self.physics_linear_speed_delta = max(self.physics_linear_speed_delta, linear_delta)
+        self.physics_angular_speed_delta = max(self.physics_angular_speed_delta, angular_delta)
+        self.last_physics_linear_speed = linear_speed
+        self.last_physics_angular_speed = angular_speed
+        if (
+            linear_delta >= BAD_PHYSICS_SPEED_JUMP_LIMIT
+            or angular_delta >= BAD_PHYSICS_SPEED_JUMP_LIMIT
+        ):
             return True
-        if np.linalg.norm(self.data.qvel[3:6]) > 180.0:
+        if (
+            linear_speed >= BAD_PHYSICS_EMERGENCY_SPEED_LIMIT
+            or angular_speed >= BAD_PHYSICS_EMERGENCY_SPEED_LIMIT
+        ):
             return True
-        z = float(self.data.qpos[2])
-        return bool(z < 0.05 or z > 18.0)
+        return False
 
     def foot_contacts(self):
         contacts = np.zeros(4, dtype=np.float32)
@@ -330,6 +433,15 @@ class HopperEnv(gym.Env):
                 if foot_geom_id in pair:
                     contacts[foot_i] = 1.0
         return contacts
+
+    def _has_surface_contact(self):
+        surface_ids = {self.pad_geom_id, self.ground_geom_id}
+        for i in range(self.data.ncon):
+            con = self.data.contact[i]
+            pair = {con.geom1, con.geom2}
+            if pair & surface_ids and pair - surface_ids:
+                return True
+        return False
 
     def _apply_controls(self, main, yaw_ctrl, pitch_ctrl):
         max_delta = self.tvc_servo_speed * self.model.opt.timestep
@@ -373,15 +485,16 @@ class HopperEnv(gym.Env):
         rel_dist = float(np.linalg.norm(relative_pos[:2]))
         upright_score = float(np.dot(body_axis, np.array([0.0, 0.0, 1.0])))
         spin_about_body_axis = float(np.dot(angular_vel, body_axis))
-        flip_axis = np.array([0.0, 1.0, 0.0])
-        flip_axis_rate_signed = float(np.dot(angular_vel, flip_axis))
+        flip_axis_world = rot @ np.array([0.0, 1.0, 0.0])
+        flip_axis_rate_signed = float(np.dot(angular_vel, flip_axis_world))
         flip_axis_rate = abs(flip_axis_rate_signed)
-        positive_flip_axis_rate = max(flip_axis_rate_signed, 0.0)
-        off_axis_angular_vel = angular_vel - flip_axis_rate_signed * flip_axis
+        # Nose-over-tail flip hareketi modelde local pitch ekseninin negatif yonunde.
+        positive_flip_axis_rate = max(-flip_axis_rate_signed, 0.0)
+        off_axis_angular_vel = angular_vel - flip_axis_rate_signed * flip_axis_world
         off_axis_angular_speed = float(np.linalg.norm(off_axis_angular_vel))
         expected_flip_angle = min(self.flip_progress, 1.0) * FULL_FLIP_RAD
         expected_body_axis = np.array([
-            np.sin(expected_flip_angle),
+            -np.sin(expected_flip_angle),
             0.0,
             np.cos(expected_flip_angle),
         ])
@@ -396,24 +509,31 @@ class HopperEnv(gym.Env):
             "joint_speed": joint_speed,
             "rel_dist": rel_dist,
             "horizontal_speed": float(np.linalg.norm(linear_vel[:2])),
+            "vertical_velocity": float(linear_vel[2]),
             "vertical_speed": abs(float(linear_vel[2])),
+            "vertical_velocity_change": abs(float(linear_vel[2]) - self.last_vertical_velocity),
             "upright_score": upright_score,
             "body_axis": body_axis,
+            "flip_axis_world": flip_axis_world,
+            "flip_axis_rate_signed": flip_axis_rate_signed,
             "flip_axis_rate": flip_axis_rate,
             "positive_flip_axis_rate": positive_flip_axis_rate,
             "off_axis_angular_speed": off_axis_angular_speed,
             "expected_axis_alignment": expected_axis_alignment,
             "spin_about_body_axis": spin_about_body_axis,
+            "world_z_spin": float(angular_vel[2]),
             "side_deviation": abs(float(body_axis[1])),
         }
 
     def _update_flip_progress(self):
         metrics = self._compute_metrics()
-        flip_rate = metrics["positive_flip_axis_rate"]
         dt = self.model.opt.timestep * self.frame_skip
-        if self.current_phase == "flip":
+        self.last_flip_progress_delta = 0.0
+        if self.current_phase == "flip" and not self.flip_surface_contact:
+            flip_rate = metrics["positive_flip_axis_rate"]
             self.flip_angle += flip_rate * dt
             self.flip_progress = self.flip_angle / FULL_FLIP_RAD
+            self.last_flip_progress_delta = float(flip_rate * dt / FULL_FLIP_RAD)
 
     def _compute_phase_reward(self, metrics):
         if self.current_phase == "climb":
@@ -436,7 +556,6 @@ class HopperEnv(gym.Env):
         horizontal_speed = float(np.linalg.norm(linear_vel[:2]))
         vertical_speed = abs(float(linear_vel[2]))
         target_z = 10.0
-        low_altitude_error = max(9.0 - z, 0.0)
 
         reward = 0.0
         rw = self.reward_weights
@@ -444,11 +563,8 @@ class HopperEnv(gym.Env):
             reward -= abs(z - target_z) * rw["climb_z_error"]
         else:
             reward -= rw["climb_high_z"] * z
-        reward -= low_altitude_error * rw["climb_low_altitude"]
-        reward -= low_altitude_error ** 2 * rw["climb_low_altitude_sq"]
         reward -= abs(float(relative_pos[0])) * rw["climb_x"]
         reward -= abs(float(relative_pos[1])) * rw["climb_y"]
-        reward -= metrics["rel_dist"] ** 2 * rw["climb_rel_dist_sq"]
         reward -= w * rw["climb_angular_speed"]
         reward -= joint_speed * rw["climb_joint_speed"]
         reward += upright_score * rw["climb_upright"]
@@ -461,43 +577,93 @@ class HopperEnv(gym.Env):
         z = metrics["z"]
         w = metrics["w"]
         joint_speed = metrics["joint_speed"]
-        upright_score = metrics["upright_score"]
         body_axis = metrics["body_axis"]
-        angular_vel = metrics["angular_vel"]
         side_deviation = abs(float(body_axis[1]))
-        spin_about_body_axis = float(np.dot(angular_vel, body_axis))
+        spin_about_body_axis = metrics["spin_about_body_axis"]
+        world_z_spin = metrics["world_z_spin"]
         off_axis_angular_speed = metrics["off_axis_angular_speed"]
+        positive_flip_axis_rate = metrics["positive_flip_axis_rate"]
         expected_axis_alignment = metrics["expected_axis_alignment"]
-        progress_delta = abs(self.flip_progress) - abs(self.last_step_flip_progress)
+        descent_speed = max(-metrics["vertical_velocity"], 0.0)
+        rel_dist = metrics["rel_dist"]
+        rel_progress = self.last_rel_dist - rel_dist
         rw = self.reward_weights
+        rel_away = max(-rel_progress, 0.0)
+        rel_boundary_error = max(rel_dist - rw["flip_rel_boundary_start"], 0.0)
+        horizontal_speed = metrics["horizontal_speed"]
+        high_thrust = max(self.main_motor_power - 0.45, 0.0)
+        progress_delta = self.last_flip_progress_delta
+        progress = float(np.clip(self.flip_progress, 0.0, 1.0))
+        progress_late_scale = 1.0 + progress ** 2 * rw["flip_progress_late_scale"]
+        no_progress_late_scale = 1.0 + progress ** 2 * rw["flip_no_progress_late_scale"]
+        completion_pressure_scale = 1.0 + progress ** 2 * rw["flip_completion_pressure_late_scale"]
+        completion_error = max(1.0 - progress, 0.0)
+        rel_quality = float(np.clip(1.0 - rel_dist / 1.2, 0.0, 1.0))
+        thrust_rel_quality = float(np.clip(1.0 - rel_dist / rw["flip_rel_dist_limit"], 0.0, 1.0))
+        horizontal_quality = float(np.clip(1.0 - horizontal_speed / 4.0, 0.0, 1.0))
+        z_spin_quality = float(np.clip(1.0 - abs(world_z_spin) / 1.0, 0.0, 1.0))
+        off_axis_quality = float(np.clip(1.0 - off_axis_angular_speed / 6.0, 0.0, 1.0))
+        flip_quality = rel_quality * horizontal_quality * z_spin_quality * off_axis_quality
 
         reward = 0.0
-        flip_height_error = abs(z - 10.0)
-        reward -= flip_height_error * rw["flip_height_error"]
-        reward += progress_delta * rw["flip_progress"]
-        if progress_delta <= 0.001:
-            reward -= rw["flip_stall"]
+        if z < 13.0:
+            reward += z * rw["flip_height_reward"]
+        reward += progress_delta * rw["flip_progress"] * progress_late_scale * flip_quality
+        reward += positive_flip_axis_rate * rw["flip_axis_rate"] * flip_quality
+        reward -= completion_error * rw["flip_completion_pressure"] * completion_pressure_scale
+        if progress_delta <= 1e-5:
+            reward -= rw["flip_no_progress"] * no_progress_late_scale
+        altitude_progress_target = float(np.clip((10.5 - z) / 5.5, 0.0, 0.85))
+        altitude_progress_error = max(altitude_progress_target - progress, 0.0)
+        reward -= altitude_progress_error ** 2 * rw["flip_altitude_progress"]
         if self.flip_progress > 1.0:
             reward -= self.flip_progress * rw["flip_overrotate"]
-        if z < 5.0:
-            reward -= z * rw["flip_low_altitude"]
-        upright_change = abs(upright_score - self.last_upright_score)
-        if upright_change > 0.3:
-            reward -= upright_change * rw["flip_upright_change"]
+        low_altitude_error = max(5.0 - z, 0.0)
+        if low_altitude_error > 0.0:
+            reward -= low_altitude_error ** 2 * rw["flip_low_altitude"]
+        airtime_error = max(9.0 - z, 0.0)
+        if airtime_error > 0.0 and self.flip_progress < 0.85:
+            reward -= airtime_error ** 2 * rw["flip_airtime_floor"]
+        descent_over_safe = max(descent_speed - 1.0, 0.0)
+        if self.flip_progress < 0.85:
+            reward -= descent_over_safe * rw["flip_descent_speed"]
+            reward -= descent_over_safe ** 2 * rw["flip_descent_speed_sq"]
+            if z < 9.0:
+                reward -= descent_over_safe * rw["flip_low_altitude_descent"]
+            low_thrust = max(0.45 - self.main_motor_power, 0.0)
+            reward += self.main_motor_power * descent_over_safe * rw["flip_thrust_while_falling"] * thrust_rel_quality
+            reward -= (1.0 - self.main_motor_power) * descent_over_safe * rw["flip_no_thrust_while_falling"]
+            reward -= low_thrust * descent_over_safe * rw["flip_low_thrust_descent"]
+            if z < 9.0:
+                reward -= low_thrust * descent_over_safe * rw["flip_low_altitude_low_thrust"]
+            reward += progress_delta * descent_over_safe * rw["flip_descent_progress"] * flip_quality
+            if z < 8.0 and progress < 0.85:
+                axis_rate_error = max(6.0 - positive_flip_axis_rate, 0.0)
+                reward -= axis_rate_error * rw["flip_low_axis_rate"]
+        reward -= rel_dist * rw["flip_rel_dist"]
+        reward -= rel_dist ** 2 * rw["flip_rel_dist_sq"]
+        reward += rel_progress * rw["flip_rel_progress"]
+        reward -= rel_away * rw["flip_rel_away"]
+        reward -= rel_boundary_error * rw["flip_rel_boundary"]
+        reward -= rel_boundary_error ** 2 * rw["flip_rel_boundary_sq"]
+        reward -= horizontal_speed * rw["flip_horizontal_speed"]
+        reward -= horizontal_speed ** 2 * rw["flip_horizontal_speed_sq"]
+        reward -= rel_boundary_error * horizontal_speed * rw["flip_boundary_horizontal_speed"]
+        reward -= rel_boundary_error * high_thrust * rw["flip_boundary_thrust"]
+        reward -= rel_away * high_thrust * rw["flip_away_thrust"]
         if w > 30.0:
             reward -= w * rw["flip_high_angular_speed"]
-        reward += expected_axis_alignment * rw["flip_axis_alignment"]
+        if self.flip_progress >= rw["flip_axis_alignment_progress_start"]:
+            reward += expected_axis_alignment * rw["flip_axis_alignment"]
         reward -= off_axis_angular_speed * rw["flip_off_axis"]
         reward -= joint_speed * rw["flip_joint_speed"]
         reward -= side_deviation * rw["flip_side_deviation"]
-        reward -= metrics["rel_dist"] * rw["flip_rel_dist"]
-        reward -= metrics["rel_dist"] ** 2 * rw["flip_rel_dist_sq"]
         if self.flip_progress > 0.75:
             reward -= w * rw["flip_late_angular_speed"]
         reward -= rw["flip_body_spin"] * abs(spin_about_body_axis)
+        reward -= rw["flip_world_z_spin"] * abs(world_z_spin)
 
-        fail = bool((z < 3.5 and self.flip_progress < 0.15) or w > 70.0)
-        return reward, fail
+        return reward, False
 
     def _compute_recovery_reward(self, metrics):
         v = metrics["v"]
@@ -517,7 +683,7 @@ class HopperEnv(gym.Env):
         reward -= rel_dist * rw["recovery_rel_dist"]
         reward += rel_progress * rw["recovery_rel_progress"]
 
-        fail = bool(v > 70.0 or w > 70.0 or rel_dist > 1.5)
+        fail = bool(rel_dist > 1.5)
         return reward, fail
 
     def _compute_hover_reward(self, metrics):
@@ -548,14 +714,8 @@ class HopperEnv(gym.Env):
         if self._has_bad_physics():
             self.fail_reason = "bad_physics"
             return True
-        if abs(float(relative_pos[0])) > 6.0 or abs(float(relative_pos[1])) > 6.0:
-            self.fail_reason = "global_xy_escape"
-            return True
-        if v > 45.0 or w > 60.0:
-            self.fail_reason = "global_speed_limit"
-            return True
-        if z < 0.05 or z > 18.0:
-            self.fail_reason = "global_height_limit"
+        if self.surface_contact or z < 0.08:
+            self.fail_reason = "flip_surface_contact" if self.current_phase == "flip" else "surface_contact"
             return True
 
         if self.current_phase == "climb":
@@ -564,36 +724,51 @@ class HopperEnv(gym.Env):
                 return True
             return False
         if self.current_phase == "flip":
+            if self.flip_surface_contact:
+                self.fail_reason = "flip_surface_contact"
+                return True
+            if rel_dist > self.reward_weights["flip_rel_dist_limit"]:
+                self.fail_reason = "flip_xy_escape"
+                return True
             if z < 3.5 and self.flip_progress < 0.15:
                 self.fail_reason = "flip_too_low_too_early"
                 return True
-            if w > 70.0:
-                self.fail_reason = "flip_angular_speed_limit"
+            return False
+        if self.current_phase == "recovery":
+            if rel_dist > 1.5:
+                self.fail_reason = "recovery_target_escape"
                 return True
             return False
-        if self.current_phase in {"recovery", "hover"}:
+        if self.current_phase == "hover":
             if v > 70.0 or w > 70.0:
-                self.fail_reason = f"{self.current_phase}_speed_limit"
+                self.fail_reason = "hover_speed_limit"
                 return True
             if rel_dist > 1.5:
-                self.fail_reason = f"{self.current_phase}_target_escape"
+                self.fail_reason = "hover_target_escape"
                 return True
             return False
         return False
 
     def _infer_fail_reason(self, metrics):
+        if self.surface_contact or metrics["z"] < 0.08:
+            return "flip_surface_contact" if self.current_phase == "flip" else "surface_contact"
         if self.current_phase == "flip":
-            if metrics["w"] > 60.0:
-                return "flip_angular_speed_limit"
-            if metrics["z"] < 3.5:
-                return "flip_low_altitude"
-        if self.current_phase in {"recovery", "hover"}:
+            if self.flip_surface_contact:
+                return "flip_surface_contact"
+            if metrics["rel_dist"] > self.reward_weights["flip_rel_dist_limit"]:
+                return "flip_xy_escape"
+            if metrics["z"] < 3.5 and self.flip_progress < 0.15:
+                return "flip_too_low_too_early"
+        if self.current_phase == "recovery":
             if metrics["rel_dist"] > 1.5:
-                return f"{self.current_phase}_target_escape"
-            if metrics["v"] > 45.0 or metrics["w"] > 60.0:
-                return f"{self.current_phase}_speed_limit"
+                return "recovery_target_escape"
+        if self.current_phase == "hover":
+            if metrics["rel_dist"] > 1.5:
+                return "hover_target_escape"
+            if metrics["v"] > 70.0 or metrics["w"] > 70.0:
+                return "hover_speed_limit"
         if self.current_phase == "climb":
-            return "climb_fail"
+            return "climb_xy_escape"
         return "phase_reward_fail"
 
     def _update_phase(self, metrics):
@@ -602,23 +777,28 @@ class HopperEnv(gym.Env):
             return 0.0
 
         if self.current_phase == "climb":
-            if 9.0 <= metrics["z"] <= 10.0 and metrics["upright_score"] > 0.85:
+            if metrics["z"] >= 10.0 and metrics["upright_score"] > 0.85:
                 self.current_phase = "flip"
-                self.flip_angle = 0.0
-                self.flip_progress = 0.0
-                self.last_step_flip_progress = 0.0
-                return 50.0
+                self._reset_flip_tracking()
+                return 0.0
 
         if self.current_phase == "flip":
-            if self.flip_progress > 0.95 and metrics["upright_score"] > 0.85:
+            flip_is_clean = (
+                metrics["rel_dist"] <= 1.2
+                and metrics["horizontal_speed"] <= 4.0
+                and abs(metrics["world_z_spin"]) <= 1.0
+                and metrics["z"] >= 4.0
+                and metrics["vertical_velocity"] >= -6.0
+            )
+            if self.flip_progress > 0.85 and metrics["upright_score"] > 0.85 and flip_is_clean:
                 self.current_phase = "recovery"
-                return 150.0
+                return self.reward_weights["flip_completion_bonus"]
 
         if self.current_phase == "recovery":
             if self.flip_progress > 0.95 and metrics["upright_score"] > 0.95:
                 self.current_phase = "hover"
                 self.hover_timer = 0.0
-                return 100.0
+                return 0.0
 
         if self.current_phase == "hover":
             dt = self.model.opt.timestep * self.frame_skip

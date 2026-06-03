@@ -25,6 +25,7 @@ climb -> flip -> recovery -> hover -> done
 - `requirements.txt`: Python dependencies.
 
 Training outputs are written under `runs/` and are ignored by Git.
+Root-level generated watch CSV files and model zip files are also ignored.
 
 Each algorithm file has a `REWARD_WEIGHTS` dictionary. Leave it empty to use
 the shared defaults from `hopper_env.py`, or override only the reward weights
@@ -47,6 +48,23 @@ python rl.py train --algo sac --timesteps 250000 --chunk-steps 25000
 python rl.py train --algo ppo --timesteps 250000 --chunk-steps 25000
 python rl.py train --algo td3 --timesteps 250000 --chunk-steps 25000
 ```
+
+Flip-focused SAC training from a fixed start height:
+
+```bash
+python rl.py train --algo sac --timesteps 500000 --chunk-steps 25000 --start-phase flip --fixed-start-z --start-z 11 --max-thrust 45
+```
+
+Telegram notifications are optional. Copy the example file, fill it locally,
+and do not commit the real secret file:
+
+```bash
+cp telegram_secrets.example.json telegram_secrets.json
+```
+
+You can also provide credentials through `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID`. The default notification interval is 10000 training steps;
+override it with `--telegram-every`.
 
 The trainer saves:
 
@@ -77,6 +95,12 @@ Start from a fixed height:
 
 ```bash
 python rl.py watch --algo sac --fixed-start-z --start-z 9.3
+```
+
+Watch a flip-focused SAC checkpoint:
+
+```bash
+python rl.py watch --algo sac --model runs/sac_hopper_<timestamp>/checkpoints/sac_hopper_500000.zip --start-phase flip --fixed-start-z --start-z 11 --max-thrust 45 --csv watch.csv
 ```
 
 ## Visualize
