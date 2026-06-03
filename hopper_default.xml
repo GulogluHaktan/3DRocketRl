@@ -1,7 +1,7 @@
 <mujoco model="vtvl_hopper">
 
     <compiler angle="degree" coordinate="local"/>
-    
+
     <option gravity="0 0 -9.81"
             timestep="0.002"
             integrator="implicitfast"
@@ -61,7 +61,7 @@
         <!-- HOPPER -->
         <!-- ================================================= -->
 
-        <!-- 
+        <!--
             IMPORTANT:
             Hopper body origin is placed at COM reference frame.
             Legs touch ground at Z=0.
@@ -87,7 +87,7 @@
             <!-- MAIN BODY -->
             <!-- ================================================= -->
 
-            <!-- 
+            <!--
                 Body extends:
                 bottom = Z=0
                 top    = Z=1.0
@@ -108,7 +108,7 @@
             <!-- LANDING LEGS -->
             <!-- ================================================= -->
 
-            <!-- 
+            <!--
                 Legs attach at Z=0.35
                 Feet touch Z=0
                 Radial span = 0.4 m
@@ -214,7 +214,7 @@
             <!-- TVC SYSTEM -->
             <!-- ================================================= -->
 
-            <!-- 
+            <!--
                 TVC pivot location:
                 Z = 0.255 from ground
 
@@ -233,7 +233,7 @@
                       type="hinge"
                       axis="1 0 0"
                       range="-25 25"
-                      damping="0.1" 
+                      damping="0.1"
                       armature="0.002"
                       frictionloss="0.005"/>
 
@@ -278,7 +278,7 @@
     <!-- ACTUATORS -->
     <!-- ================================================= -->
 
-<actuator>
+    <actuator>
         <position joint="tvc_yaw_joint"
                   kp="10"
                   ctrlrange="-25 25"
@@ -289,5 +289,10 @@
                   ctrlrange="-25 25"
                   forcerange="-2.5 2.5"/>
     </actuator>
+
+    <sensor>
+        <user name="main_thrust_newton" dim="1"/>
+        <user name="main_thrust_percent" dim="1"/>
+    </sensor>
 
 </mujoco>

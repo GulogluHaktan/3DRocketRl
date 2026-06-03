@@ -1,10 +1,11 @@
 import argparse
+import importlib
 import time
 from pathlib import Path
 
 import numpy as np
 
-from hopper_env import HopperEnv, OBSERVATION_NAMES
+from hopper_env import HopperEnv
 
 
 ALGORITHMS = {
@@ -28,12 +29,34 @@ def load_model(algo, model_path, env):
     return Algorithm.load(str(model_path), env=env, device="cpu")
 
 
-def print_observation(obs):
+def get_algo_env_config(algo):
+    try:
+        module = importlib.import_module(algo)
+    except ModuleNotFoundError:
+        return {}, {}
+    return (
+        getattr(module, "REWARD_WEIGHTS", {}),
+        getattr(module, "ENV_KWARGS", {}),
+    )
+
+
+def print_observation(obs, observation_names, info):
     values = ", ".join(
         f"{name}={value:.3f}"
-        for name, value in zip(OBSERVATION_NAMES, obs)
+        for name, value in zip(observation_names, obs)
     )
+    values = f"{values}, main_thrust_newton={float(info.get('main_thrust_newton', 0.0)):.3f}"
     print(values)
+
+
+def printable_info(info):
+    result = {}
+    for key, value in info.items():
+        if isinstance(value, (int, float, np.floating, np.integer, bool)):
+            result[key] = round(float(value), 3)
+        else:
+            result[key] = value
+    return result
 
 
 def main():
@@ -100,6 +123,7 @@ def main():
         help="Maksimum TVC acisi derece.",
     )
     args = parser.parse_args()
+    reward_weights, env_kwargs = get_algo_env_config(args.algo)
 
     env = HopperEnv(
         start_z=args.start_z,
@@ -108,6 +132,8 @@ def main():
         random_start_z=not args.fixed_start_z,
         min_start_z=args.min_start_z,
         max_start_z=args.max_start_z,
+        reward_weights=reward_weights,
+        **env_kwargs,
     )
     obs, _ = env.reset()
     model = None
@@ -138,10 +164,10 @@ def main():
             step_count += 1
 
             if args.print_obs and step_count % 30 == 0:
-                print_observation(obs)
+                print_observation(obs, env.observation_names, info)
 
             if terminated or truncated:
-                print("Episode bitti:", {k: round(v, 3) for k, v in info.items()})
+                print("Episode bitti:", printable_info(info))
                 time.sleep(0.5)
                 obs, _ = env.reset()
                 step_count = 0

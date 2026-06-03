@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hopper_env import HopperEnv, OBSERVATION_NAMES
+from hopper_env import HopperEnv
 from telegram_notifier import TelegramNotifier
 
 
@@ -23,6 +23,9 @@ EXTRA_INFO_KEYS = (
     "surface_contact",
     "flip_surface_contact",
     "hover_timer",
+    "climb_ready_timer",
+    "flip_low_altitude_stall_timer",
+    "recovery_low_altitude_timer",
     "upright_score",
     "rel_dist",
     "linear_speed",
@@ -41,20 +44,24 @@ EXTRA_INFO_KEYS = (
     "physics_linear_speed_delta",
     "physics_angular_speed_delta",
     "height",
+    "main_thrust_newton",
 )
 
 
-def make_env(args, reward_weights=None):
-    return HopperEnv(
-        start_z=args.start_z,
-        max_thrust=args.max_thrust,
-        max_tvc_deg=args.max_tvc_deg,
-        random_start_z=args.random_start_z or not args.fixed_start_z,
-        min_start_z=args.min_start_z,
-        max_start_z=args.max_start_z,
-        start_phase=args.start_phase,
-        reward_weights=reward_weights,
-    )
+def make_env(args, reward_weights=None, env_kwargs=None):
+    config = {
+        "start_z": args.start_z,
+        "max_thrust": args.max_thrust,
+        "max_tvc_deg": args.max_tvc_deg,
+        "random_start_z": args.random_start_z or not args.fixed_start_z,
+        "min_start_z": args.min_start_z,
+        "max_start_z": args.max_start_z,
+        "start_phase": args.start_phase,
+        "reward_weights": reward_weights,
+    }
+    if env_kwargs:
+        config.update(env_kwargs)
+    return HopperEnv(**config)
 
 
 def make_run_dir(algo_name, base_dir="runs"):
@@ -83,6 +90,7 @@ def make_step_callback(
     session_start_steps,
     session_total_steps,
     session_start_time,
+    observation_names,
     telegram_notifier=None,
     telegram_every=10_000,
     callback_state=None,
@@ -120,11 +128,12 @@ def make_step_callback(
                 "episode_reward",
                 "episode_length",
                 "done",
-                *OBSERVATION_NAMES,
+                *observation_names,
                 *EXTRA_INFO_KEYS,
             )
             self.writer = csv.DictWriter(self.file, fieldnames=fields)
             self.writer.writeheader()
+            self.next_progress_update = self.num_timesteps
 
         def _on_step(self):
             infos = self.locals.get("infos", [])
@@ -150,7 +159,7 @@ def make_step_callback(
                     "episode_length": self.episode_length,
                     "done": True,
                 }
-                for key in OBSERVATION_NAMES:
+                for key in observation_names:
                     row[key] = info.get(key, "")
                 for key in EXTRA_INFO_KEYS:
                     row[key] = info.get(key, "")
@@ -237,12 +246,21 @@ def make_step_callback(
     return EpisodeCSVCallback()
 
 
-def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_weights=None):
+def train_loop(
+    args,
+    algo_name,
+    Algorithm,
+    BaseCallback,
+    model_kwargs,
+    reward_weights=None,
+    env_kwargs=None,
+):
     run_dir = Path(args.run_dir) if args.run_dir else make_run_dir(algo_name, args.runs_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
 
-    env = make_env(args, reward_weights=reward_weights)
+    env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+    observation_names = tuple(env.observation_names)
     telegram_notifier = None
     if not args.no_telegram:
         telegram_notifier = TelegramNotifier.from_config(args.telegram_config)
@@ -305,6 +323,7 @@ def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_we
             session_start_steps=session_start_steps,
             session_total_steps=args.timesteps,
             session_start_time=session_start_time,
+            observation_names=observation_names,
             telegram_notifier=telegram_notifier,
             telegram_every=max(int(args.telegram_every), 0),
             callback_state=callback_state,
@@ -319,7 +338,7 @@ def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_we
         model.save(checkpoint)
         model.save(run_model)
         model.save(root_model)
-        print(f"Checkpoint kaydedildi: {checkpoint}")
+        print(f"\nCheckpoint kaydedildi: {checkpoint}")
         remaining -= chunk_steps
 
     plot_run(run_dir)
@@ -329,8 +348,9 @@ def train_loop(args, algo_name, Algorithm, BaseCallback, model_kwargs, reward_we
         telegram_notifier.send(f"[{algo_name.upper()} TRAIN DONE]\nrun: {run_dir}")
 
 
-def watch_model(args, algo_name, Algorithm, reward_weights=None):
-    env = make_env(args, reward_weights=reward_weights)
+def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None):
+    env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+    observation_names = tuple(env.observation_names)
     obs, _ = env.reset()
     model_path = args.model or f"{algo_name}_hopper_latest.zip"
     model = Algorithm.load(model_path, env=env, device="cpu")
@@ -350,7 +370,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None):
                 "episode_reward",
                 "episode_length",
                 "done",
-                *OBSERVATION_NAMES,
+                *observation_names,
                 *EXTRA_INFO_KEYS,
             ),
         )
@@ -376,7 +396,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None):
                     "episode_length": step_count,
                     "done": done,
                 }
-                for key in OBSERVATION_NAMES:
+                for key in observation_names:
                     row[key] = info.get(key, "")
                 for key in EXTRA_INFO_KEYS:
                     row[key] = info.get(key, "")
