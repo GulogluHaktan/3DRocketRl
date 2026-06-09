@@ -49,3 +49,59 @@ class TelegramNotifier:
         except OSError as exc:
             print(f"[Telegram] mesaj gonderilemedi: {exc}", flush=True)
             return False
+
+    def send_video(self, path: str | Path, caption: str) -> bool:
+        if not self.enabled:
+            return False
+        path = Path(path)
+        if not path.exists():
+            print(f"[Telegram] Video dosyasi bulunamadi: {path}", flush=True)
+            return False
+
+        import uuid
+        boundary = f"boundary-{uuid.uuid4()}"
+        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+
+        # Read the video data
+        try:
+            video_data = path.read_bytes()
+        except OSError as exc:
+            print(f"[Telegram] Video okunamadi: {exc}", flush=True)
+            return False
+
+        # Build multipart body
+        body = []
+        # Add chat_id field
+        body.append(f"--{boundary}".encode("utf-8"))
+        body.append(f'Content-Disposition: form-data; name="chat_id"'.encode("utf-8"))
+        body.append(b"")
+        body.append(self.chat_id.encode("utf-8"))
+
+        # Add caption field if present
+        if caption:
+            body.append(f"--{boundary}".encode("utf-8"))
+            body.append(f'Content-Disposition: form-data; name="caption"'.encode("utf-8"))
+            body.append(b"")
+            body.append(caption.encode("utf-8"))
+
+        # Add video field
+        body.append(f"--{boundary}".encode("utf-8"))
+        body.append(f'Content-Disposition: form-data; name="video"; filename="{path.name}"'.encode("utf-8"))
+        body.append(b"Content-Type: video/mp4")
+        body.append(b"")
+        body.append(video_data)
+
+        # End boundary
+        body.append(f"--{boundary}--".encode("utf-8"))
+        body.append(b"")
+
+        payload = b"\r\n".join(body)
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendVideo"
+        request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return 200 <= response.status < 300
+        except OSError as exc:
+            print(f"[Telegram] Video gonderilemedi: {exc}", flush=True)
+            return False

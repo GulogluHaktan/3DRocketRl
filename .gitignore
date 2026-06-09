@@ -19,8 +19,11 @@ archive_unused/
 __pycache__/
 *.pyc
 *_hopper_*.zip
+*_latest.zip
 *.csv
 *.tmp
+phase_models.json
+test_runs/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/

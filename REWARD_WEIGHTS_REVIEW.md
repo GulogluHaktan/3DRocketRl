@@ -21,7 +21,13 @@ SAC no longer uses milestone bonuses, completion pressure, no-progress penalties
 | `reward_velocity_score` | `dense_velocity` | Rewards controlled, lower linear speed. |
 | `reward_flip_axis_score` | `dense_flip_axis`, `dense_flip_progress_delta` | Rewards intended flip-axis rotation and only positive progress delta. |
 | `reward_flip_upright_recovery_score` | `dense_flip_upright_recovery` | Smoothly rewards becoming upright, low-spin, and near target after most of the flip is complete. |
-| `reward_hover_stability_score` | `dense_hover_stability` | Rewards upright, low-speed, low-angular-speed stability near hover target. |
+| `reward_climb_target_score` | `dense_climb_target` | Rewards being near the flip-start altitude while staying horizontally centered. |
+| `reward_climb_upright_score` | `dense_climb_upright` | Rewards upright, low-angular-speed climb posture. |
+| `reward_climb_velocity_score` | `dense_climb_velocity` | Rewards controlled upward speed when below flip altitude and slowing near the target. |
+| `reward_hover_height_score` | `dense_hover_height` | Rewards being near hover target height while staying horizontally centered. |
+| `reward_hover_upright_score` | `dense_hover_upright` | Rewards upright hover posture. |
+| `reward_hover_velocity_score` | `dense_hover_velocity` | Rewards low vertical, horizontal, and angular speed in hover. |
+| `reward_hover_stability_score` | `dense_hover_stability` | Product-style stability score for recovery/hover near the hover target. |
 
 ### Continuous Penalties
 
@@ -50,15 +56,30 @@ In `flip` phase, static "stay calm/upright" rewards are intentionally reduced so
 - `penalty_safety` also penalizes climbing above the flip corridor, so full-thrust vertical escape is not a better alternative to rotating.
 - `penalty_overrotate` grows after one flip, reducing the value of endless spin.
 
+In `climb` phase, dense shaping follows the same principle:
+
+- Generic position/height/velocity rewards are reduced to support signals.
+- `reward_climb_target_score` is the main "arrive centered at flip altitude" signal.
+- `reward_climb_velocity_score` rewards upward motion below the target and slowing down near it.
+- `reward_climb_upright_score` keeps the rocket stable without making low-altitude idling too valuable.
+- Drift, angular, yaw, control-effort, smoothness, and safety penalties remain active every step.
+
+In `hover` phase, the reward is also dense instead of milestone-heavy:
+
+- `reward_hover_height_score` rewards staying near the hover height and target center.
+- `reward_hover_velocity_score` rewards damping vertical/horizontal/angular motion.
+- `reward_hover_upright_score` and `reward_hover_stability_score` favor stable posture near the target.
+- The 5-second success timer still decides task success, but SAC does not receive a phase-transition bonus.
+
 ### SAC Safety And Entropy
 
 | Key | SAC value | Notes |
 | --- | ---: | --- |
 | `time_penalty` | 0.01 | Small anti-stall pressure. |
-| `failure_penalty` | 25.0 | Modest terminal failure cost. |
-| `success_bonus` | 50.0 | Modest terminal success reward. |
-| `flip_xy_escape_penalty` | 30.0 | Extra terminal cost for lateral flip escape. |
-| `flip_surface_contact_penalty` | 40.0 | Extra terminal cost for flip ground contact. |
+| `failure_penalty` | 150.0 | Terminal failure cost for dense SAC. |
+| `success_bonus` | 200.0 | Terminal success reward for dense SAC. |
+| `flip_xy_escape_penalty` | 100.0 | Extra terminal cost for lateral flip escape. |
+| `flip_surface_contact_penalty` | 120.0 | Extra terminal cost for flip ground contact. |
 | `flip_rel_dist_limit` | 5.0 | Hard flip escape limit used by fail logic. |
 | `--sac-ent-coef` | `auto_0.02` | Passed directly to Stable-Baselines3 SAC `ent_coef`. |
 
@@ -90,13 +111,43 @@ These fail/success mechanics still apply to both reward modes:
 | `flip_xy_escape` | Flip | Terminates when `rel_dist > flip_rel_dist_limit`. |
 | `flip_too_low_too_early` | Flip | Terminates if altitude is below 3.5 m while progress is below 0.15. |
 | `recovery_target_escape` | Recovery | Terminates when `rel_dist > recovery_max_rel_dist`. |
-| `hover_target_escape` | Hover | Terminates when `rel_dist > hover_max_rel_dist`. |
+| `hover_target_escape` | Hover | Terminates when `rel_dist > hover_fail_rel_dist`; stable hover still uses `hover_max_rel_dist`. |
 | `hover_speed_limit` | Hover | Terminates when linear or angular speed exceeds 70. |
 | `success` | Hover | Requires stable hover for 5 seconds. |
 
 ## Logging
 
 `rl_common.py` writes all dense breakdown keys into train CSV and watch CSV through `EXTRA_INFO_KEYS`. In legacy mode these fields are present but zero, so TD3/PPO logs remain schema-compatible.
+
+## SAC Specialist Models
+
+SAC can now train four 31-observation specialists with `--specialist-phase climb|flip|recovery|hover`.
+Each specialist starts from its own phase reset and treats the next phase handoff as success, except hover which uses the stable hover timer.
+`watch` and `eval` can route between separate models with `--phase-models-config phase_models.json`; single-model `--model` still works.
+For specialist training, `--specialist-phase` and `--start-phase` must match.
+
+Specialist training commands:
+
+```bash
+python rl.py train --algo sac --specialist-phase climb --timesteps 500000 --chunk-steps 25000 --start-phase climb --fixed-start-z --start-z 2 --max-thrust 45
+python rl.py train --algo sac --specialist-phase flip --timesteps 500000 --chunk-steps 25000 --start-phase flip --fixed-start-z --start-z 11 --max-thrust 45
+python rl.py train --algo sac --specialist-phase recovery --timesteps 500000 --chunk-steps 25000 --start-phase recovery --fixed-start-z --start-z 9 --max-thrust 45
+python rl.py train --algo sac --specialist-phase hover --timesteps 500000 --chunk-steps 25000 --start-phase hover --fixed-start-z --start-z 5 --max-thrust 45
+```
+
+Specialist runs save both `runs/sac_<phase>_<stamp>/sac_hopper_latest.zip` for router configs and a root-level `sac_<phase>_latest.zip` to avoid overwriting the single-model `sac_hopper_latest.zip`.
+
+Copy `phase_models.example.json` to `phase_models.json`, fill in the run paths, then run the router:
+
+```bash
+python rl.py eval --algo sac --phase-models-config phase_models.json --start-phase climb --fixed-start-z --start-z 2 --max-thrust 45 --episodes 3 --csv router_eval.csv
+```
+
+Or generate `phase_models.json` from the latest specialist runs:
+
+```bash
+python rl.py make-phase-config --output phase_models.json --fallback-flip runs/sac_hopper_20260603_152230/sac_hopper_latest.zip
+```
 
 Use headless evaluation after training to compare checkpoints without opening the viewer:
 
@@ -111,6 +162,7 @@ python rl.py eval --algo sac --run-dir runs/<run> --start-phase flip --fixed-sta
 ```
 
 The eval summary prints max flip progress, max axis rate, max target drift, min height, final fail reason, and overrotate penalty.
+For specialist runs it also prints `specialist_successes` and `specialist_handoffs`, which count phase handoff successes and their target phases.
 
 Use these columns to detect dominance:
 
@@ -119,3 +171,5 @@ Use these columns to detect dominance:
 - Sideways flip exploit: raise `dense_drift`, `dense_yaw_spin`, or `dense_off_axis`.
 - Falls before rotating: raise `dense_safety`, `dense_flip_axis`, or `dense_flip_progress_delta`.
 - Spins past one flip: raise `dense_overrotate` or `dense_flip_upright_recovery`.
+- Climb stalls below flip height: raise `dense_climb_velocity` or `dense_climb_target`.
+- Hover wobbles or drifts: raise `dense_hover_velocity`, `dense_hover_height`, or `dense_drift`.

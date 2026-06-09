@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 
-from rl_common import plot_run
+from rl_common import make_phase_models_config, plot_run
 
 
 ALGORITHMS = {
@@ -29,9 +29,10 @@ def add_env_args(parser):
     parser.add_argument("--random-start-z", action="store_true")
     parser.add_argument("--min-start-z", type=float, default=0.5)
     parser.add_argument("--max-start-z", type=float, default=10.0)
-    parser.add_argument("--start-phase", choices=("climb", "flip"), default="climb")
+    parser.add_argument("--start-phase", choices=("climb", "flip", "recovery", "hover"), default="climb")
     parser.add_argument("--max-thrust", type=float, default=None)
     parser.add_argument("--max-tvc-deg", type=float, default=20.0)
+    parser.add_argument("--tvc-servo-sec-per-60deg", type=float, default=0.13)
 
 
 def add_train_args(parser):
@@ -41,9 +42,12 @@ def add_train_args(parser):
     parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--specialist-phase", choices=("climb", "flip", "recovery", "hover"), default=None)
     parser.add_argument("--telegram-config", default="telegram_secrets.json")
     parser.add_argument("--telegram-every", type=int, default=10_000)
     parser.add_argument("--no-telegram", action="store_true")
+    parser.add_argument("--telegram-video-every", type=int, default=100_000)
+    parser.add_argument("--no-telegram-video", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--gamma", type=float, default=0.97)
@@ -66,6 +70,8 @@ def add_train_args(parser):
 def add_watch_args(parser):
     parser.add_argument("--algo", choices=sorted(ALGORITHMS), default="sac")
     parser.add_argument("--model", default=None)
+    parser.add_argument("--phase-models-config", default=None)
+    parser.add_argument("--specialist-phase", choices=("climb", "flip", "recovery", "hover"), default=None)
     parser.add_argument("--csv", default=None)
     add_env_args(parser)
     parser.set_defaults(fixed_start_z=True)
@@ -74,6 +80,8 @@ def add_watch_args(parser):
 def add_eval_args(parser):
     parser.add_argument("--algo", choices=sorted(ALGORITHMS), default="sac")
     parser.add_argument("--model", default=None)
+    parser.add_argument("--phase-models-config", default=None)
+    parser.add_argument("--specialist-phase", choices=("climb", "flip", "recovery", "hover"), default=None)
     parser.add_argument("--models-glob", default=None)
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--episodes", type=int, default=3)
@@ -90,6 +98,16 @@ def main():
     train_parser = sub.add_parser("train")
     add_train_args(train_parser)
 
+    train_specialists_parser = sub.add_parser("train-specialists")
+    add_train_args(train_specialists_parser)
+    train_specialists_parser.add_argument("--timesteps-per-phase", type=int, default=500_000)
+    train_specialists_parser.add_argument(
+        "--phases",
+        nargs="+",
+        choices=("climb", "flip", "recovery", "hover"),
+        default=("climb", "flip", "recovery", "hover"),
+    )
+
     watch_parser = sub.add_parser("watch")
     add_watch_args(watch_parser)
 
@@ -99,16 +117,74 @@ def main():
     plot_parser = sub.add_parser("plot")
     plot_parser.add_argument("run_dir")
 
+    phase_config_parser = sub.add_parser("make-phase-config")
+    phase_config_parser.add_argument("--output", default="phase_models.json")
+    phase_config_parser.add_argument("--runs-dir", default="runs")
+    phase_config_parser.add_argument(
+        "--fallback-flip",
+        default="runs/sac_hopper_20260603_152230/sac_hopper_latest.zip",
+    )
+    phase_config_parser.add_argument("--require-all", action="store_true")
+
     args = parser.parse_args()
+
+    if (
+        hasattr(args, "specialist_phase")
+        and args.specialist_phase is not None
+        and args.start_phase != args.specialist_phase
+    ):
+        parser.error(
+            "--specialist-phase ile --start-phase ayni olmali "
+            f"({args.specialist_phase!r} != {args.start_phase!r})."
+        )
 
     if args.mode == "train":
         load_algo(args.algo).train(args)
+    elif args.mode == "train-specialists":
+        import copy
+        start_z_map = {
+            "climb": 2.0,
+            "flip": 11.0,
+            "recovery": 9.0,
+            "hover": 5.0,
+        }
+        algo_mod = load_algo(args.algo)
+        for phase in args.phases:
+            print(f"\n=========================================")
+            print(f"STARTING PHASE SPECIALIST TRAINING: {phase.upper()}")
+            print(f"=========================================\n")
+            phase_args = copy.deepcopy(args)
+            phase_args.specialist_phase = phase
+            phase_args.start_phase = phase
+            phase_args.start_z = start_z_map[phase]
+            phase_args.fixed_start_z = True
+            if phase_args.max_thrust is None:
+                phase_args.max_thrust = 45.0
+            phase_args.timesteps = args.timesteps_per_phase
+            phase_args.run_dir = None
+            algo_mod.train(phase_args)
     elif args.mode == "watch":
         load_algo(args.algo).watch(args)
     elif args.mode == "eval":
         load_algo(args.algo).evaluate(args)
     elif args.mode == "plot":
         plot_run(args.run_dir)
+    elif args.mode == "make-phase-config":
+        try:
+            config, missing = make_phase_models_config(
+                args.output,
+                runs_dir=args.runs_dir,
+                algo_name="sac",
+                fallback_flip=args.fallback_flip,
+                require_all=args.require_all,
+            )
+        except FileNotFoundError as exc:
+            parser.exit(1, f"{exc}\n")
+        print(f"Phase config yazildi: {args.output}")
+        if missing:
+            print("Eksik specialist modeller:", ", ".join(missing))
+        for phase, path in config.items():
+            print(f"{phase}: {path}")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import glob
+import json
 import time
 from pathlib import Path
 
@@ -16,6 +17,9 @@ ETA_REPORT_STEPS = 5_000
 
 EXTRA_INFO_KEYS = (
     "phase",
+    "specialist_phase",
+    "specialist_success",
+    "specialist_handoff_phase",
     "success",
     "fail",
     "fail_reason",
@@ -56,10 +60,12 @@ def make_env(args, reward_weights=None, env_kwargs=None):
         "start_z": args.start_z,
         "max_thrust": args.max_thrust,
         "max_tvc_deg": args.max_tvc_deg,
+        "tvc_servo_sec_per_60deg": getattr(args, "tvc_servo_sec_per_60deg", 0.13),
         "random_start_z": args.random_start_z or not args.fixed_start_z,
         "min_start_z": args.min_start_z,
         "max_start_z": args.max_start_z,
         "start_phase": args.start_phase,
+        "specialist_phase": getattr(args, "specialist_phase", None),
         "reward_weights": reward_weights,
     }
     if env_kwargs:
@@ -67,9 +73,51 @@ def make_env(args, reward_weights=None, env_kwargs=None):
     return HopperEnv(**config)
 
 
-def make_run_dir(algo_name, base_dir="runs"):
+def generate_headless_video(env, model, video_path, duration_sec=8.0, fps=30):
+    import imageio
+    import mujoco
+    import numpy as np
+
+    renderer = mujoco.Renderer(env.model, height=480, width=640)
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.distance = 5.0
+    cam.azimuth = 135.0
+    cam.elevation = -18.0
+
+    frames = []
+    obs, _ = env.reset()
+    dt = env.model.opt.timestep * env.frame_skip
+    total_steps = int(duration_sec / dt)
+    step_interval = int(round(1.0 / (fps * dt)))
+    if step_interval < 1:
+        step_interval = 1
+
+    step_count = 0
+    while step_count < total_steps:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(action)
+
+        if step_count % step_interval == 0:
+            pos = env.data.xpos[env.body_id]
+            cam.lookat[:] = pos
+            renderer.update_scene(env.data, camera=cam)
+            pixels = renderer.render()
+            frames.append(pixels)
+
+        step_count += 1
+        if terminated or truncated:
+            break
+
+    video_path = Path(video_path)
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    imageio.mimsave(str(video_path), frames, fps=fps)
+
+
+def make_run_dir(algo_name, base_dir="runs", specialist_phase=None):
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(base_dir) / f"{algo_name}_hopper_{stamp}"
+    run_name = f"{algo_name}_{specialist_phase}_{stamp}" if specialist_phase else f"{algo_name}_hopper_{stamp}"
+    run_dir = Path(base_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
     return run_dir
@@ -258,7 +306,11 @@ def train_loop(
     reward_weights=None,
     env_kwargs=None,
 ):
-    run_dir = Path(args.run_dir) if args.run_dir else make_run_dir(algo_name, args.runs_dir)
+    run_dir = (
+        Path(args.run_dir)
+        if args.run_dir
+        else make_run_dir(algo_name, args.runs_dir, getattr(args, "specialist_phase", None))
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
 
@@ -277,8 +329,14 @@ def train_loop(
                 f"[Telegram] acik: her {args.telegram_every} stepte bildirim.",
                 flush=True,
             )
-    root_model = f"{algo_name}_hopper_latest.zip"
+    specialist_phase = getattr(args, "specialist_phase", None)
+    root_model = (
+        f"{algo_name}_{specialist_phase}_latest.zip"
+        if specialist_phase
+        else f"{algo_name}_hopper_latest.zip"
+    )
     run_model = run_dir / root_model
+    run_compat_model = run_dir / f"{algo_name}_hopper_latest.zip"
 
     if args.resume:
         model = Algorithm.load(args.resume, env=env, device="cpu")
@@ -312,6 +370,7 @@ def train_loop(
             f"run: {run_dir}"
         )
 
+    last_video_step = 0
     while remaining > 0:
         chunk_steps = min(args.chunk_steps, remaining)
         chunk_index += 1
@@ -340,8 +399,64 @@ def train_loop(
         checkpoint = run_dir / "checkpoints" / f"{algo_name}_hopper_{model.num_timesteps}.zip"
         model.save(checkpoint)
         model.save(run_model)
+        if run_compat_model != run_model:
+            model.save(run_compat_model)
+        
+        # Preserve golden flip model if it exists in root
+        if root_model == f"{algo_name}_flip_latest.zip" and Path(root_model).exists():
+            golden_backup = Path(root_model).parent / f"{algo_name}_flip_latest_golden.zip"
+            if not golden_backup.exists():
+                import shutil
+                try:
+                    shutil.copy2(root_model, golden_backup)
+                    print(f"Golden flip model backed up to: {golden_backup}", flush=True)
+                except Exception as exc:
+                    print(f"Golden flip model backup hatasi: {exc}", flush=True)
+
         model.save(root_model)
         print(f"\nCheckpoint kaydedildi: {checkpoint}")
+
+        # Headless video generation
+        video_every = getattr(args, "telegram_video_every", 100_000)
+        no_video = getattr(args, "no_telegram_video", False)
+        if not no_video and video_every > 0:
+            completed_steps = model.num_timesteps
+            if (completed_steps // video_every) > (last_video_step // video_every):
+                last_video_step = completed_steps
+                print(f"\n[Video] Headless watch videosu uretiliyor... (step {completed_steps})", flush=True)
+                video_name = f"watch_{specialist_phase or 'hopper'}_{completed_steps}.mp4"
+                video_path = run_dir / "videos" / video_name
+                try:
+                    import copy
+                    video_args = copy.deepcopy(args)
+                    video_args.fixed_start_z = True
+                    # Create env
+                    video_env = make_env(video_args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+                    # Generate video
+                    generate_headless_video(
+                        env=video_env,
+                        model=model,
+                        video_path=video_path,
+                        duration_sec=8.0,
+                        fps=30
+                    )
+                    video_env.close()
+                    print(f"[Video] Video kaydedildi: {video_path}", flush=True)
+
+                    if telegram_notifier is not None and telegram_notifier.enabled:
+                        caption = (
+                            f"[{algo_name.upper()} WATCH VIDEO]\n"
+                            f"Phase: {specialist_phase or 'hopper'}\n"
+                            f"Step: {completed_steps}\n"
+                            f"Run: {run_dir.name}"
+                        )
+                        print(f"[Telegram] Video gonderiliyor: {video_path}", flush=True)
+                        telegram_notifier.send_video(video_path, caption)
+                except Exception as exc:
+                    print(f"[Video] Video uretimi veya gonderimi sirasinda hata: {exc}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+
         remaining -= chunk_steps
 
     plot_run(run_dir)
@@ -351,12 +466,110 @@ def train_loop(
         telegram_notifier.send(f"[{algo_name.upper()} TRAIN DONE]\nrun: {run_dir}")
 
 
+PHASE_MODEL_KEYS = ("climb", "flip", "recovery", "hover")
+
+
+def load_phase_models(config_path, Algorithm, env):
+    config_path = Path(config_path)
+    with config_path.open() as file:
+        config = json.load(file)
+
+    phase_paths = {}
+    for phase in PHASE_MODEL_KEYS:
+        path = config.get(phase)
+        fallback_flip = config.get("fallback_flip")
+        if phase == "flip" and fallback_flip and (not path or not Path(path).exists()):
+            path = fallback_flip
+        if not path:
+            raise ValueError(f"{config_path} icinde '{phase}' modeli yok.")
+        phase_paths[phase] = Path(path)
+
+    if config.get("fallback_flip"):
+        phase_paths["fallback_flip"] = Path(config["fallback_flip"])
+
+    missing = [str(path) for phase, path in phase_paths.items() if phase != "fallback_flip" and not path.exists()]
+    if missing:
+        raise FileNotFoundError("Phase model bulunamadi: " + ", ".join(missing))
+
+    cache = {}
+    phase_models = {}
+    for phase in PHASE_MODEL_KEYS:
+        path = phase_paths[phase]
+        if path not in cache:
+            cache[path] = Algorithm.load(path, env=env, device="cpu")
+        phase_models[phase] = cache[path]
+    return phase_models, phase_paths
+
+
+def make_phase_models_config(
+    output_path,
+    runs_dir="runs",
+    algo_name="sac",
+    fallback_flip=None,
+    require_all=False,
+):
+    runs_dir = Path(runs_dir)
+    config = {}
+    missing = []
+    for phase in PHASE_MODEL_KEYS:
+        latest = find_latest_specialist_model(runs_dir, algo_name, phase)
+        if latest is None:
+            if phase == "flip" and fallback_flip:
+                config[phase] = str(Path(fallback_flip))
+            else:
+                missing.append(phase)
+                config[phase] = str(
+                    runs_dir / f"{algo_name}_{phase}_<run>" / f"{algo_name}_hopper_latest.zip"
+                )
+        else:
+            config[phase] = str(latest)
+
+    if fallback_flip:
+        config["fallback_flip"] = str(Path(fallback_flip))
+
+    if require_all and missing:
+        raise FileNotFoundError("Eksik specialist model: " + ", ".join(missing))
+
+    output_path = Path(output_path)
+    output_path.write_text(json.dumps(config, indent=2) + "\n")
+    return config, missing
+
+
+def find_latest_specialist_model(runs_dir, algo_name, phase):
+    candidates = []
+    for run_dir in runs_dir.glob(f"{algo_name}_{phase}_*"):
+        model_path = run_dir / f"{algo_name}_hopper_latest.zip"
+        if model_path.exists():
+            candidates.append(model_path)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def phase_model_for_env(env, phase_models, phase_paths):
+    phase = env.current_phase
+    if phase not in phase_models:
+        phase = "hover"
+    return phase, phase_models[phase], str(phase_paths[phase])
+
+
+def append_sequence_value(sequence, value):
+    if value and (not sequence or sequence[-1] != value):
+        sequence.append(value)
+
+
 def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None):
     env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
     observation_names = tuple(env.observation_names)
     obs, _ = env.reset()
+    phase_models = None
+    phase_paths = None
     model_path = args.model or f"{algo_name}_hopper_latest.zip"
-    model = Algorithm.load(model_path, env=env, device="cpu")
+    if getattr(args, "phase_models_config", None):
+        phase_models, phase_paths = load_phase_models(args.phase_models_config, Algorithm, env)
+        model = None
+    else:
+        model = Algorithm.load(model_path, env=env, device="cpu")
     viewer = env.launch_viewer()
     csv_file = None
     writer = None
@@ -373,6 +586,8 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
                 "episode_reward",
                 "episode_length",
                 "done",
+                "active_model",
+                "active_model_path",
                 *observation_names,
                 *EXTRA_INFO_KEYS,
             ),
@@ -384,7 +599,11 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
     episode_reward = 0.0
     try:
         while viewer.is_running():
-            action, _ = model.predict(obs, deterministic=True)
+            if phase_models is not None:
+                active_phase, active_model, active_model_path = phase_model_for_env(env, phase_models, phase_paths)
+            else:
+                active_phase, active_model, active_model_path = env.current_phase, model, str(model_path)
+            action, _ = active_model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
             step_count += 1
             episode_reward += float(reward)
@@ -398,6 +617,8 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
                     "episode_reward": episode_reward,
                     "episode_length": step_count,
                     "done": done,
+                    "active_model": active_phase,
+                    "active_model_path": active_model_path,
                 }
                 for key in observation_names:
                     row[key] = info.get(key, "")
@@ -409,6 +630,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
             if done:
                 episode_index += 1
                 print("Episode bitti:", {
+                    "active_model": active_phase,
                     "phase": info.get("phase"),
                     "success": info.get("success"),
                     "fail": info.get("fail"),
@@ -442,7 +664,13 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
 def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None):
     env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
     observation_names = tuple(env.observation_names)
-    model_paths = resolve_eval_model_paths(args, algo_name)
+    phase_models = None
+    phase_paths = None
+    if getattr(args, "phase_models_config", None):
+        phase_models, phase_paths = load_phase_models(args.phase_models_config, Algorithm, env)
+        model_paths = [Path(args.phase_models_config)]
+    else:
+        model_paths = resolve_eval_model_paths(args, algo_name)
     csv_file = None
     writer = None
 
@@ -459,6 +687,8 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
                 "episode_reward",
                 "episode_length",
                 "done",
+                "active_model",
+                "active_model_path",
                 *observation_names,
                 *EXTRA_INFO_KEYS,
             ),
@@ -469,7 +699,7 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
     try:
         for model_path in model_paths:
             model_path = Path(model_path)
-            model = Algorithm.load(model_path, env=env, device="cpu")
+            model = None if phase_models is not None else Algorithm.load(model_path, env=env, device="cpu")
             model_summaries = []
             for episode_index in range(1, args.episodes + 1):
                 obs, _ = env.reset()
@@ -480,8 +710,15 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
                 min_height = float("inf")
                 final_info = {}
                 final_step = 0
+                phase_sequence = [env.current_phase]
+                active_model_sequence = []
                 for step_count in range(1, args.max_steps + 1):
-                    action, _ = model.predict(obs, deterministic=True)
+                    if phase_models is not None:
+                        active_phase, active_model, active_model_path = phase_model_for_env(env, phase_models, phase_paths)
+                    else:
+                        active_phase, active_model, active_model_path = env.current_phase, model, str(model_path)
+                    append_sequence_value(active_model_sequence, active_phase)
+                    action, _ = active_model.predict(obs, deterministic=True)
                     obs, reward, terminated, truncated, info = env.step(action)
                     reward = float(reward)
                     episode_reward += reward
@@ -492,6 +729,7 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
                     min_height = min(min_height, float(info.get("height", 0.0)))
                     final_info = info
                     final_step = step_count
+                    append_sequence_value(phase_sequence, info.get("phase"))
 
                     if writer is not None:
                         row = {
@@ -502,6 +740,8 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
                             "episode_reward": episode_reward,
                             "episode_length": step_count,
                             "done": done,
+                            "active_model": active_phase,
+                            "active_model_path": active_model_path,
                         }
                         for key in observation_names:
                             row[key] = info.get(key, "")
@@ -516,14 +756,22 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
                     csv_file.flush()
 
                 summary = {
-                    "model": str(model_path),
+                    "model": (
+                        f"phase-router:{model_path}"
+                        if phase_models is not None
+                        else str(model_path)
+                    ),
                     "episode": episode_index,
                     "steps": final_step,
                     "reward": round(episode_reward, 3),
                     "phase": final_info.get("phase"),
                     "success": final_info.get("success"),
+                    "specialist_success": final_info.get("specialist_success"),
+                    "specialist_handoff_phase": final_info.get("specialist_handoff_phase"),
                     "fail": final_info.get("fail"),
                     "fail_reason": final_info.get("fail_reason"),
+                    "phase_sequence": ">".join(phase_sequence),
+                    "active_model_sequence": ">".join(active_model_sequence),
                     "max_flip_progress": round(max_flip_progress, 3),
                     "final_flip_progress": round(float(final_info.get("flip_progress", 0.0)), 3),
                     "max_axis_rate": round(max_axis_rate, 3),
@@ -578,17 +826,32 @@ def print_eval_summary(label, summaries):
     if not summaries:
         return
     successes = sum(1 for item in summaries if item["success"])
+    specialist_successes = sum(1 for item in summaries if item.get("specialist_success"))
     print(
         f"{label}:",
         {
             "models": len({item["model"] for item in summaries}),
             "episodes": len(summaries),
             "successes": successes,
+            "specialist_successes": specialist_successes,
             "best_flip_progress": max(item["max_flip_progress"] for item in summaries),
             "avg_reward": round(sum(item["reward"] for item in summaries) / len(summaries), 3),
             "fail_reasons": {
                 reason: sum(1 for item in summaries if item["fail_reason"] == reason)
                 for reason in sorted({item["fail_reason"] for item in summaries})
+            },
+            "phase_sequences": {
+                sequence: sum(1 for item in summaries if item.get("phase_sequence") == sequence)
+                for sequence in sorted({item.get("phase_sequence", "") for item in summaries})
+            },
+            "active_model_sequences": {
+                sequence: sum(1 for item in summaries if item.get("active_model_sequence") == sequence)
+                for sequence in sorted({item.get("active_model_sequence", "") for item in summaries})
+            },
+            "specialist_handoffs": {
+                phase: sum(1 for item in summaries if item.get("specialist_handoff_phase") == phase)
+                for phase in sorted({item.get("specialist_handoff_phase", "") for item in summaries})
+                if phase
             },
         },
         flush=True,

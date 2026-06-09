@@ -55,6 +55,35 @@ Flip-focused SAC training from a fixed start height:
 python rl.py train --algo sac --timesteps 500000 --chunk-steps 25000 --start-phase flip --fixed-start-z --start-z 11 --max-thrust 45
 ```
 
+### Specialist Gece Eğitimi (`train-specialists`)
+
+Tüm specialist aşamalarını (`climb → flip → recovery → hover`) sırayla ve her aşama için optimize edilmiş başlangıç yükseklikleriyle tek komutla çalıştırmak için:
+
+```bash
+.venv/bin/python rl.py train-specialists \
+  --algo sac \
+  --timesteps-per-phase 500000 \
+  --chunk-steps 25000 \
+  --max-thrust 45 \
+  --telegram-every 100000 \
+  --telegram-video-every 100000
+```
+
+**Varsayılan Aşamalar ve Yükseklik Başlangıçları:**
+- `climb`: `--start-z 2`
+- `flip`: `--start-z 11`
+- `recovery`: `--start-z 9`
+- `hover`: `--start-z 5`
+- Tüm aşamalarda `--fixed-start-z` ve `--max-thrust 45` otomatik olarak uygulanır.
+
+**Opsiyonel Parametreler:**
+- `--phases`: Eğitilecek aşamaları seçmek için (Örn: `--phases climb recovery hover`). Varsayılan: `climb flip recovery hover`.
+- `--no-telegram-video`: Telegram video gönderimini devre dışı bırakır.
+- `--tvc-servo-sec-per-60deg 0.13`: Gerçek servo tepki hızını saniye cinsinden yapılandırır.
+
+**Yedekleme Güvencesi:**
+- Flip eğitimi başladığında, root dizindeki mevcut `sac_flip_latest.zip` (Golden Model) ezilmez; otomatik olarak `sac_flip_latest_golden.zip` adı altında yedeklenir.
+
 Telegram notifications are optional. Copy the example file, fill it locally,
 and do not commit the real secret file:
 
@@ -64,7 +93,7 @@ cp telegram_secrets.example.json telegram_secrets.json
 
 You can also provide credentials through `TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_CHAT_ID`. The default notification interval is 10000 training steps;
-override it with `--telegram-every`.
+override it with `--telegram-every`. Her 100k stepte bir aktif uzman checkpoint'inden üretilen headless watch videosu Telegram'a otomatik gönderilir.
 
 The trainer saves:
 
@@ -72,6 +101,7 @@ The trainer saves:
 runs/<algo>_hopper_<timestamp>/steps_chunk_*.csv
 runs/<algo>_hopper_<timestamp>/checkpoints/<algo>_hopper_*.zip
 runs/<algo>_hopper_<timestamp>/<algo>_hopper_latest.zip
+runs/<algo>_hopper_<timestamp>/videos/watch_*.mp4
 <algo>_hopper_latest.zip
 ```
 
@@ -118,5 +148,5 @@ python visualize.py --zero
 - Action space: `[main_thrust, yaw_tvc, pitch_tvc]`.
 - Max thrust defaults to `3.6 kgf`.
 - Max TVC angle defaults to `20 deg`.
-- TVC servo speed is limited to `60 deg / 0.14 s`.
+- TVC servo hızı `--tvc-servo-sec-per-60deg` parametresine bağlıdır (Varsayılan: `0.13` saniyede `60°` dönme hızı, yani yaklaşık `461.5 deg/s`).
 - Viewer camera follows the rocket body.
