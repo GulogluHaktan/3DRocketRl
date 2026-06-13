@@ -50,7 +50,7 @@ def add_train_args(parser):
     parser.add_argument("--no-telegram-video", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--gamma", type=float, default=0.97)
+    parser.add_argument("--gamma", type=float, default=0.99)
 
     # SAC/TD3 args.
     parser.add_argument("--buffer-size", type=int, default=300_000)
@@ -146,7 +146,7 @@ def main():
             "climb": 2.0,
             "flip": 11.0,
             "recovery": 9.0,
-            "hover": 5.0,
+            "hover": 7.5,
         }
         algo_mod = load_algo(args.algo)
         for phase in args.phases:

@@ -120,7 +120,7 @@ REWARD_WEIGHTS = {
 }
 ENV_KWARGS = {
     "flip_target_z": 10.0,
-    "hover_target_z": 5.0,
+    "hover_target_z": 7.5,
     "include_task_state_observation": True,
     "use_corrected_flip_low_altitude_penalty": True,
     "max_climb_ready_time": 1.2,
@@ -142,7 +142,7 @@ ENV_KWARGS = {
     "hover_stable_min_upright": 0.9,
     "hover_stable_max_linear_speed": 2.0,
     "hover_stable_max_angular_speed": 2.0,
-    "flip_complete_progress": 0.97,
+    "flip_complete_progress": 0.90,
     "flip_complete_min_upright": 0.85,
     "flip_upright_recovery_progress": 0.82,
     "flip_upright_recovery_min_upright": 0.95,
@@ -172,6 +172,10 @@ def train(args):
         "gradient_steps": 1,
         "learning_starts": args.learning_starts,
         "action_noise": action_noise,
+        "policy_delay": 2,
+        "target_policy_noise": 0.2,
+        "target_noise_clip": 0.5,
+        "policy_kwargs": dict(net_arch=[400, 300]),
     }
     train_loop(args, ALGO_NAME, TD3, BaseCallback, model_kwargs, REWARD_WEIGHTS, ENV_KWARGS)
 

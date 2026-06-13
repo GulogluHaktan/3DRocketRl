@@ -948,7 +948,7 @@ class HopperEnv(gym.Env):
         metrics = self._compute_metrics()
         dt = self.model.opt.timestep * self.frame_skip
         self.last_flip_progress_delta = 0.0
-        if self.current_phase == "flip" and not self.flip_surface_contact:
+        if self.current_phase in {"flip", "recovery"} and not self.flip_surface_contact:
             flip_rate = metrics["positive_flip_axis_rate"]
             self.flip_angle += flip_rate * dt
             self.flip_progress = self.flip_angle / FULL_FLIP_RAD
@@ -1545,7 +1545,10 @@ class HopperEnv(gym.Env):
                 return 0.0
 
         if self.current_phase == "flip":
-            if self.flip_progress > 0.95 and metrics["upright_score"] > 0.85:
+            if (
+                self.flip_progress >= self.flip_complete_progress
+                and metrics["upright_score"] >= self.flip_complete_min_upright
+            ):
                 self.current_phase = "recovery"
                 return max(
                     self.reward_weights.get("flip_completion_bonus", 0.0),
