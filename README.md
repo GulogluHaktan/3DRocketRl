@@ -55,6 +55,56 @@ Flip-focused SAC training from a fixed start height:
 python rl.py train --algo sac --timesteps 500000 --chunk-steps 25000 --start-phase flip --fixed-start-z --start-z 11 --max-thrust 45
 ```
 
+### Zeminden 3 Metre Kalkış Eğitimi
+
+Başka makinede sadece yerden kalkıp yaklaşık 3 metreye yükselmeyi öğretmek için
+tek bir SAC climb eğitimi çalıştırılabilir. Bu komut `train-specialists`
+gece modunu kullanmaz; yalnızca climb görevini 3 metre hedef bandına göre
+eğitir.
+
+```bash
+cd /path/to/3drocket
+
+if [ -x ".venv/bin/python" ]; then PY=".venv/bin/python";
+elif [ -x "../.venv/bin/python" ]; then PY="../.venv/bin/python";
+else PY="python"; fi
+
+$PY rl.py train --algo sac \
+  --specialist-phase climb \
+  --start-phase climb \
+  --fixed-start-z \
+  --start-z 0.5 \
+  --max-thrust 45 \
+  --flip-target-z 3.0 \
+  --flip-start-min-z 2.8 \
+  --flip-start-max-z 3.2 \
+  --climb-ready-min-z 2.7 \
+  --timesteps 300000 \
+  --chunk-steps 25000 \
+  --telegram-every 25000
+```
+
+Eğitimden sonra izlemek için:
+
+```bash
+$PY rl.py watch --algo sac \
+  --model runs/<sac_climb_run>/sac_climb_latest.zip \
+  --specialist-phase climb \
+  --start-phase climb \
+  --fixed-start-z \
+  --start-z 0.5 \
+  --max-thrust 45 \
+  --flip-target-z 3.0 \
+  --flip-start-min-z 2.8 \
+  --flip-start-max-z 3.2 \
+  --climb-ready-min-z 2.7 \
+  --csv watch_3m_takeoff.csv
+```
+
+Bu eğitimde başarı koşulu roketin merkezden çok kaçmadan, upright kalarak,
+kontrollü hızla `2.8 m - 3.2 m` bandına gelmesidir. Mevcut flip/recovery/hover
+specialist zincirinden bağımsızdır.
+
 ### Specialist Gece Eğitimi (`train-specialists`)
 
 Tüm specialist aşamalarını (`climb → flip → recovery → hover`) sırayla ve her aşama için optimize edilmiş başlangıç yükseklikleriyle tek komutla çalıştırmak için:
