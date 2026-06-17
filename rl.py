@@ -34,6 +34,10 @@ def add_env_args(parser):
     parser.add_argument("--max-tvc-deg", type=float, default=20.0)
     parser.add_argument("--tvc-servo-sec-per-60deg", type=float, default=0.13)
     parser.add_argument("--phase-start-roughness", type=float, default=0.0)
+    parser.add_argument("--flip-target-z", type=float, default=None)
+    parser.add_argument("--flip-start-min-z", type=float, default=None)
+    parser.add_argument("--flip-start-max-z", type=float, default=None)
+    parser.add_argument("--climb-ready-min-z", type=float, default=None)
 
 
 def add_train_args(parser):

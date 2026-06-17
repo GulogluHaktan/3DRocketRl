@@ -85,6 +85,15 @@ def make_env(args, reward_weights=None, env_kwargs=None):
     }
     if env_kwargs:
         config.update(env_kwargs)
+    for arg_name in (
+        "flip_target_z",
+        "flip_start_min_z",
+        "flip_start_max_z",
+        "climb_ready_min_z",
+    ):
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            config[arg_name] = value
     phase_start_roughness = float(getattr(args, "phase_start_roughness", 0.0) or 0.0)
     if phase_start_roughness > 0.0:
         if args.start_phase == "flip":
