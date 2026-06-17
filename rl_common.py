@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 
+import gymnasium as gym
 import numpy as np
 
 from hopper_env import HopperEnv, REWARD_BREAKDOWN_KEYS
@@ -20,6 +21,12 @@ EXTRA_INFO_KEYS = (
     "specialist_phase",
     "specialist_success",
     "specialist_handoff_phase",
+    "handoff_used",
+    "handoff_attempt",
+    "handoff_steps",
+    "handoff_phase",
+    "handoff_reward",
+    "handoff_active_model_sequence",
     "success",
     "fail",
     "fail_reason",
@@ -50,9 +57,17 @@ EXTRA_INFO_KEYS = (
     "physics_angular_speed_delta",
     "height",
     "main_thrust_newton",
+    "ready_for_flip",
+    "ready_for_recovery",
+    "ready_for_hover",
+    "hover_stable",
     "reward_mode",
     *REWARD_BREAKDOWN_KEYS,
 )
+
+
+def unique_fields(fields):
+    return tuple(dict.fromkeys(fields))
 
 
 def make_env(args, reward_weights=None, env_kwargs=None):
@@ -70,7 +85,162 @@ def make_env(args, reward_weights=None, env_kwargs=None):
     }
     if env_kwargs:
         config.update(env_kwargs)
+    phase_start_roughness = float(getattr(args, "phase_start_roughness", 0.0) or 0.0)
+    if phase_start_roughness > 0.0:
+        if args.start_phase == "flip":
+            config["flip_start_roughness"] = phase_start_roughness
+        elif args.start_phase == "recovery":
+            config["recovery_start_roughness"] = phase_start_roughness
+        elif args.start_phase == "hover":
+            config["hover_start_roughness"] = phase_start_roughness
     return HopperEnv(**config)
+
+
+class HandoffStartWrapper(gym.Wrapper):
+    def __init__(
+        self,
+        env,
+        handoff_model,
+        target_phase,
+        max_steps=600,
+        attempts=20,
+    ):
+        super().__init__(env)
+        self.handoff_model = handoff_model
+        self.target_phase = target_phase
+        self.max_steps = int(max_steps)
+        self.attempts = int(attempts)
+        self.last_handoff_info = {}
+
+    def reset(self, **kwargs):
+        last_info = {}
+        for attempt in range(1, max(self.attempts, 1) + 1):
+            reset_kwargs = dict(kwargs)
+            if attempt > 1:
+                reset_kwargs.pop("seed", None)
+            obs, info = self.env.reset(**reset_kwargs)
+            if self.env.current_phase == self.target_phase:
+                self.last_handoff_info = {
+                    "handoff_used": False,
+                    "handoff_attempt": attempt,
+                    "handoff_steps": 0,
+                    "handoff_phase": self.env.current_phase,
+                    "handoff_reward": 0.0,
+                    "handoff_active_model_sequence": self.env.current_phase,
+                }
+                return obs, {**info, **self.last_handoff_info}
+
+            episode_reward = 0.0
+            for step in range(1, max(self.max_steps, 1) + 1):
+                action, _ = self.handoff_model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, last_info = self.env.step(action)
+                episode_reward += float(reward)
+                if self.env.current_phase == self.target_phase and not terminated and not truncated:
+                    self.last_handoff_info = {
+                        "handoff_used": True,
+                        "handoff_attempt": attempt,
+                        "handoff_steps": step,
+                        "handoff_phase": self.env.current_phase,
+                        "handoff_reward": episode_reward,
+                        "handoff_active_model_sequence": self.env.current_phase,
+                    }
+                    return obs, {
+                        **info,
+                        **self.last_handoff_info,
+                    }
+                if terminated or truncated:
+                    break
+
+        raise RuntimeError(
+            f"Handoff target phase '{self.target_phase}' bulunamadi. "
+            f"Son phase={self.env.current_phase!r}, info={last_info}"
+        )
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        if self.last_handoff_info:
+            info = {
+                **info,
+                **self.last_handoff_info,
+            }
+        return obs, reward, terminated, truncated, info
+
+
+class PhaseChainHandoffStartWrapper(gym.Wrapper):
+    def __init__(
+        self,
+        env,
+        phase_models,
+        phase_paths,
+        target_phase,
+        max_steps=1200,
+        attempts=20,
+    ):
+        super().__init__(env)
+        self.phase_models = phase_models
+        self.phase_paths = phase_paths
+        self.target_phase = target_phase
+        self.max_steps = int(max_steps)
+        self.attempts = int(attempts)
+        self.last_handoff_info = {}
+
+    def reset(self, **kwargs):
+        last_info = {}
+        for attempt in range(1, max(self.attempts, 1) + 1):
+            reset_kwargs = dict(kwargs)
+            if attempt > 1:
+                reset_kwargs.pop("seed", None)
+            obs, info = self.env.reset(**reset_kwargs)
+            active_model_sequence = []
+            if self.env.current_phase == self.target_phase:
+                self.last_handoff_info = {
+                    "handoff_used": False,
+                    "handoff_attempt": attempt,
+                    "handoff_steps": 0,
+                    "handoff_phase": self.env.current_phase,
+                    "handoff_reward": 0.0,
+                    "handoff_active_model_sequence": self.env.current_phase,
+                }
+                return obs, {**info, **self.last_handoff_info}
+
+            episode_reward = 0.0
+            for step in range(1, max(self.max_steps, 1) + 1):
+                phase = self.env.current_phase
+                if phase == "done":
+                    break
+                if phase not in self.phase_models:
+                    last_info = {"phase": phase, "error": "phase model yok"}
+                    break
+                append_sequence_value(active_model_sequence, phase)
+                action, _ = self.phase_models[phase].predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, last_info = self.env.step(action)
+                episode_reward += float(reward)
+                if self.env.current_phase == self.target_phase and not terminated and not truncated:
+                    self.last_handoff_info = {
+                        "handoff_used": True,
+                        "handoff_attempt": attempt,
+                        "handoff_steps": step,
+                        "handoff_phase": self.env.current_phase,
+                        "handoff_reward": episode_reward,
+                        "handoff_active_model_sequence": ">".join(active_model_sequence),
+                    }
+                    return obs, {**info, **self.last_handoff_info}
+                if terminated or truncated:
+                    break
+
+        raise RuntimeError(
+            f"Phase-chain handoff target phase '{self.target_phase}' bulunamadi. "
+            f"Son phase={self.env.current_phase!r}, info={last_info}"
+        )
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        if self.last_handoff_info:
+            info = {
+                **info,
+                **self.last_handoff_info,
+            }
+        return obs, reward, terminated, truncated, info
 
 
 def generate_headless_video(env, model, video_path, duration_sec=8.0, fps=30):
@@ -171,7 +341,7 @@ def make_step_callback(
 
         def _on_training_start(self):
             self.file = csv_path.open("w", newline="")
-            fields = (
+            fields = unique_fields((
                 "timestep",
                 "chunk",
                 "episode",
@@ -181,7 +351,7 @@ def make_step_callback(
                 "done",
                 *observation_names,
                 *EXTRA_INFO_KEYS,
-            )
+            ))
             self.writer = csv.DictWriter(self.file, fieldnames=fields)
             self.writer.writeheader()
             self.next_progress_update = self.num_timesteps
@@ -315,7 +485,51 @@ def train_loop(
     (run_dir / "checkpoints").mkdir(exist_ok=True)
 
     env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
-    observation_names = tuple(env.observation_names)
+    handoff_model = None
+    handoff_phase_models = None
+    handoff_phase_paths = None
+    if getattr(args, "handoff_model", None) and getattr(args, "handoff_phase_models_config", None):
+        raise ValueError("--handoff-model ve --handoff-phase-models-config ayni anda kullanilamaz.")
+    if getattr(args, "handoff_model", None):
+        if getattr(args, "specialist_phase", None) is None:
+            raise ValueError("--handoff-model icin --specialist-phase gerekli.")
+        handoff_model = Algorithm.load(args.handoff_model, env=env, device="cpu")
+        env = HandoffStartWrapper(
+            env,
+            handoff_model=handoff_model,
+            target_phase=args.specialist_phase,
+            max_steps=getattr(args, "handoff_max_steps", 600),
+            attempts=getattr(args, "handoff_attempts", 20),
+        )
+        print(
+            "[Handoff] acik: "
+            f"{args.start_phase} -> {args.specialist_phase} | "
+            f"model={args.handoff_model}",
+            flush=True,
+        )
+    elif getattr(args, "handoff_phase_models_config", None):
+        if getattr(args, "specialist_phase", None) is None:
+            raise ValueError("--handoff-phase-models-config icin --specialist-phase gerekli.")
+        handoff_phase_models, handoff_phase_paths = load_phase_models(
+            args.handoff_phase_models_config,
+            Algorithm,
+            env,
+        )
+        env = PhaseChainHandoffStartWrapper(
+            env,
+            phase_models=handoff_phase_models,
+            phase_paths=handoff_phase_paths,
+            target_phase=args.specialist_phase,
+            max_steps=getattr(args, "handoff_max_steps", 1200),
+            attempts=getattr(args, "handoff_attempts", 20),
+        )
+        print(
+            "[Phase Handoff] acik: "
+            f"{args.start_phase} -> {args.specialist_phase} | "
+            f"config={args.handoff_phase_models_config}",
+            flush=True,
+        )
+    observation_names = tuple(env.unwrapped.observation_names)
     telegram_notifier = None
     if not args.no_telegram:
         telegram_notifier = TelegramNotifier.from_config(args.telegram_config)
@@ -432,6 +646,23 @@ def train_loop(
                     video_args.fixed_start_z = True
                     # Create env
                     video_env = make_env(video_args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+                    if handoff_model is not None:
+                        video_env = HandoffStartWrapper(
+                            video_env,
+                            handoff_model=handoff_model,
+                            target_phase=args.specialist_phase,
+                            max_steps=getattr(args, "handoff_max_steps", 600),
+                            attempts=getattr(args, "handoff_attempts", 20),
+                        )
+                    elif handoff_phase_models is not None:
+                        video_env = PhaseChainHandoffStartWrapper(
+                            video_env,
+                            phase_models=handoff_phase_models,
+                            phase_paths=handoff_phase_paths,
+                            target_phase=args.specialist_phase,
+                            max_steps=getattr(args, "handoff_max_steps", 1200),
+                            attempts=getattr(args, "handoff_attempts", 20),
+                        )
                     # Generate video
                     generate_headless_video(
                         env=video_env,
@@ -460,7 +691,7 @@ def train_loop(
         remaining -= chunk_steps
 
     plot_run(run_dir)
-    env.close_viewer()
+    env.unwrapped.close_viewer()
     print(f"Run klasoru: {run_dir}")
     if telegram_notifier is not None:
         telegram_notifier.send(f"[{algo_name.upper()} TRAIN DONE]\nrun: {run_dir}")
@@ -507,12 +738,15 @@ def make_phase_models_config(
     algo_name="sac",
     fallback_flip=None,
     require_all=False,
+    model_overrides=None,
 ):
     runs_dir = Path(runs_dir)
+    model_overrides = model_overrides or {}
     config = {}
     missing = []
     for phase in PHASE_MODEL_KEYS:
-        latest = find_latest_specialist_model(runs_dir, algo_name, phase)
+        override = model_overrides.get(phase)
+        latest = Path(override) if override else find_latest_specialist_model(runs_dir, algo_name, phase)
         if latest is None:
             if phase == "flip" and fallback_flip:
                 config[phase] = str(Path(fallback_flip))
@@ -579,7 +813,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
         csv_file = csv_path.open("w", newline="")
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=(
+            fieldnames=unique_fields((
                 "episode",
                 "step",
                 "reward",
@@ -590,7 +824,7 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
                 "active_model_path",
                 *observation_names,
                 *EXTRA_INFO_KEYS,
-            ),
+            )),
         )
         writer.writeheader()
 
@@ -679,7 +913,7 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
         csv_file = csv_path.open("w", newline="")
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=(
+            fieldnames=unique_fields((
                 "model",
                 "episode",
                 "step",
@@ -691,7 +925,7 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
                 "active_model_path",
                 *observation_names,
                 *EXTRA_INFO_KEYS,
-            ),
+            )),
         )
         writer.writeheader()
 

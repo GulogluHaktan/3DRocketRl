@@ -33,6 +33,7 @@ def add_env_args(parser):
     parser.add_argument("--max-thrust", type=float, default=None)
     parser.add_argument("--max-tvc-deg", type=float, default=20.0)
     parser.add_argument("--tvc-servo-sec-per-60deg", type=float, default=0.13)
+    parser.add_argument("--phase-start-roughness", type=float, default=0.0)
 
 
 def add_train_args(parser):
@@ -43,6 +44,10 @@ def add_train_args(parser):
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--specialist-phase", choices=("climb", "flip", "recovery", "hover"), default=None)
+    parser.add_argument("--handoff-model", default=None)
+    parser.add_argument("--handoff-phase-models-config", default=None)
+    parser.add_argument("--handoff-max-steps", type=int, default=1500)
+    parser.add_argument("--handoff-attempts", type=int, default=20)
     parser.add_argument("--telegram-config", default="telegram_secrets.json")
     parser.add_argument("--telegram-every", type=int, default=10_000)
     parser.add_argument("--no-telegram", action="store_true")
@@ -120,6 +125,10 @@ def main():
     phase_config_parser = sub.add_parser("make-phase-config")
     phase_config_parser.add_argument("--output", default="phase_models.json")
     phase_config_parser.add_argument("--runs-dir", default="runs")
+    phase_config_parser.add_argument("--climb-model", default=None)
+    phase_config_parser.add_argument("--flip-model", default=None)
+    phase_config_parser.add_argument("--recovery-model", default=None)
+    phase_config_parser.add_argument("--hover-model", default=None)
     phase_config_parser.add_argument(
         "--fallback-flip",
         default="runs/sac_hopper_20260603_152230/sac_hopper_latest.zip",
@@ -128,10 +137,15 @@ def main():
 
     args = parser.parse_args()
 
+    if getattr(args, "handoff_model", None) and getattr(args, "handoff_phase_models_config", None):
+        parser.error("--handoff-model ve --handoff-phase-models-config ayni anda kullanilamaz.")
+
     if (
         hasattr(args, "specialist_phase")
         and args.specialist_phase is not None
         and args.start_phase != args.specialist_phase
+        and not getattr(args, "handoff_model", None)
+        and not getattr(args, "handoff_phase_models_config", None)
     ):
         parser.error(
             "--specialist-phase ile --start-phase ayni olmali "
@@ -157,7 +171,12 @@ def main():
             phase_args.specialist_phase = phase
             phase_args.start_phase = phase
             phase_args.start_z = start_z_map[phase]
-            phase_args.fixed_start_z = True
+            if phase == "climb":
+                phase_args.fixed_start_z = False
+                phase_args.random_start_z = True
+            else:
+                phase_args.fixed_start_z = True
+                phase_args.random_start_z = False
             if phase_args.max_thrust is None:
                 phase_args.max_thrust = 45.0
             phase_args.timesteps = args.timesteps_per_phase
@@ -177,6 +196,12 @@ def main():
                 algo_name="sac",
                 fallback_flip=args.fallback_flip,
                 require_all=args.require_all,
+                model_overrides={
+                    "climb": args.climb_model,
+                    "flip": args.flip_model,
+                    "recovery": args.recovery_model,
+                    "hover": args.hover_model,
+                },
             )
         except FileNotFoundError as exc:
             parser.exit(1, f"{exc}\n")

@@ -16,6 +16,9 @@ runs/
 training_logs/
 model_backups/
 archive_unused/
+BestModels/
+BestModels*.zip
+sac_*_golden.zip
 __pycache__/
 *.pyc
 *_hopper_*.zip
