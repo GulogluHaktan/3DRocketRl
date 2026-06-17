@@ -200,3 +200,18 @@ python visualize.py --zero
 - Max TVC angle defaults to `20 deg`.
 - TVC servo hızı `--tvc-servo-sec-per-60deg` parametresine bağlıdır (Varsayılan: `0.13` saniyede `60°` dönme hızı, yani yaklaşık `461.5 deg/s`).
 - Viewer camera follows the rocket body.
+
+$PY rl.py train --algo sac \
+  --specialist-phase recovery \
+  --start-phase recovery \
+  --attitude-recovery-test \
+  --fixed-start-z \
+  --start-z 1.0 \
+  --max-thrust 45 \
+  --max-start-tilt-deg 45 \
+  --min-start-tilt-deg 5 \
+  --upright-success-deg 5 \
+  --upright-hold-sec 1.0 \
+  --timesteps 300000 \
+  --chunk-steps 25000 \
+  --telegram-every 25000

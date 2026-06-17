@@ -38,6 +38,11 @@ def add_env_args(parser):
     parser.add_argument("--flip-start-min-z", type=float, default=None)
     parser.add_argument("--flip-start-max-z", type=float, default=None)
     parser.add_argument("--climb-ready-min-z", type=float, default=None)
+    parser.add_argument("--attitude-recovery-test", action="store_true")
+    parser.add_argument("--max-start-tilt-deg", type=float, default=45.0)
+    parser.add_argument("--min-start-tilt-deg", type=float, default=5.0)
+    parser.add_argument("--upright-success-deg", type=float, default=5.0)
+    parser.add_argument("--upright-hold-sec", type=float, default=1.0)
 
 
 def add_train_args(parser):
@@ -143,6 +148,15 @@ def main():
 
     if getattr(args, "handoff_model", None) and getattr(args, "handoff_phase_models_config", None):
         parser.error("--handoff-model ve --handoff-phase-models-config ayni anda kullanilamaz.")
+
+    if getattr(args, "attitude_recovery_test", False) and (
+        getattr(args, "start_phase", None) != "recovery"
+        or getattr(args, "specialist_phase", None) != "recovery"
+    ):
+        parser.error(
+            "--attitude-recovery-test sadece "
+            "--start-phase recovery --specialist-phase recovery ile kullanilir."
+        )
 
     if (
         hasattr(args, "specialist_phase")

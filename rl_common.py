@@ -61,6 +61,9 @@ EXTRA_INFO_KEYS = (
     "ready_for_recovery",
     "ready_for_hover",
     "hover_stable",
+    "attitude_recovery_test",
+    "attitude_upright_hold_timer",
+    "attitude_tilt_deg",
     "reward_mode",
     *REWARD_BREAKDOWN_KEYS,
 )
@@ -82,6 +85,11 @@ def make_env(args, reward_weights=None, env_kwargs=None):
         "start_phase": args.start_phase,
         "specialist_phase": getattr(args, "specialist_phase", None),
         "reward_weights": reward_weights,
+        "attitude_recovery_test": getattr(args, "attitude_recovery_test", False),
+        "max_start_tilt_deg": getattr(args, "max_start_tilt_deg", 45.0),
+        "min_start_tilt_deg": getattr(args, "min_start_tilt_deg", 5.0),
+        "upright_success_deg": getattr(args, "upright_success_deg", 5.0),
+        "upright_hold_sec": getattr(args, "upright_hold_sec", 1.0),
     }
     if env_kwargs:
         config.update(env_kwargs)
