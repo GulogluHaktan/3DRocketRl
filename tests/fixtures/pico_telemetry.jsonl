@@ -1,0 +1,2 @@
+{"v":1,"seq":100,"t_ms":2000,"quaternion":[1.0,0.0,0.0,0.0],"gyro_rad_s":[0.0,0.0,0.0],"tvc_angle_deg":[0.0,0.0],"tvc_rate_dps":[0.0,0.0],"armed":false,"imu_ok":true,"feedback":"estimated","mode":"safe"}
+{"v":1,"seq":101,"t_ms":2020,"quaternion":[0.9990482,0.0436194,0.0,0.0],"gyro_rad_s":[0.05,0.0,0.0],"tvc_angle_deg":[1.0,-1.0],"tvc_rate_dps":[10.0,-10.0],"armed":true,"imu_ok":true,"feedback":"estimated","mode":"active"}

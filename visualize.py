@@ -139,7 +139,10 @@ def main():
     model = None
 
     if not args.random and not args.zero:
-        model_path = Path(args.model or f"{args.algo}_hopper_latest.zip")
+        model_path = Path(
+            args.model
+            or Path("models/current") / f"{args.algo}_hopper_latest.zip"
+        )
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Model bulunamadi: {model_path}\n"

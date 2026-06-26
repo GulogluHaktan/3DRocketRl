@@ -10,7 +10,7 @@ import numpy as np
 from gymnasium import spaces
 
 
-MODEL_XML = Path(__file__).with_name("hopper_default.xml")
+MODEL_XML = Path(__file__).with_name("assets") / "hopper_default.xml"
 
 
 OBSERVATION_NAMES = (
@@ -254,6 +254,8 @@ class HopperEnv(gym.Env):
         random_start_z: bool = True,
         min_start_z: float = 0.5,
         max_start_z: float = 10.0,
+        reset_profile: str = "legacy",
+        legacy_reset_probability: float = 0.30,
         start_phase: str = "climb",
         specialist_phase: str | None = None,
         reward_mode: str = "legacy",
@@ -263,9 +265,10 @@ class HopperEnv(gym.Env):
         max_climb_ready_time: float | None = None,
         climb_ready_min_z: float = 8.7,
         flip_start_min_z: float = 8.0,
-        flip_start_max_z: float = 10.0,
+        flip_start_max_z: float | None = 10.0,
         flip_start_min_upright: float = 0.90,
         flip_start_max_rel_dist: float = 1.5,
+        flip_start_max_linear_speed: float | None = None,
         flip_start_max_horizontal_speed: float = 2.0,
         flip_start_min_vertical_velocity: float = -1.0,
         flip_start_max_vertical_velocity: float = 2.5,
@@ -313,11 +316,6 @@ class HopperEnv(gym.Env):
         flip_start_roughness: float = 0.0,
         recovery_start_roughness: float = 0.0,
         hover_start_roughness: float = 1.0,
-        attitude_recovery_test: bool = False,
-        max_start_tilt_deg: float = 45.0,
-        min_start_tilt_deg: float = 5.0,
-        upright_success_deg: float = 5.0,
-        upright_hold_sec: float = 1.0,
     ):
         super().__init__()
         if start_phase not in set(TRAINABLE_PHASES):
@@ -326,13 +324,10 @@ class HopperEnv(gym.Env):
             raise ValueError("specialist_phase must be one of: climb, flip, recovery, hover")
         if reward_mode not in {"legacy", "dense"}:
             raise ValueError("reward_mode must be 'legacy' or 'dense'")
-        if attitude_recovery_test and (
-            start_phase != "recovery" or specialist_phase != "recovery"
-        ):
-            raise ValueError(
-                "attitude_recovery_test only supports start_phase='recovery' "
-                "and specialist_phase='recovery'"
-            )
+        if reset_profile not in {"legacy", "handoff-mix"}:
+            raise ValueError("reset_profile must be 'legacy' or 'handoff-mix'")
+        if not 0.0 <= legacy_reset_probability <= 1.0:
+            raise ValueError("legacy_reset_probability must be in [0, 1]")
         self.model = mujoco.MjModel.from_xml_path(str(MODEL_XML))
         self.data = mujoco.MjData(self.model)
         self.body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hopper")
@@ -354,6 +349,9 @@ class HopperEnv(gym.Env):
         self.random_start_z = bool(random_start_z)
         self.min_start_z = float(min_start_z)
         self.max_start_z = float(max_start_z)
+        self.reset_profile = reset_profile
+        self.legacy_reset_probability = float(legacy_reset_probability)
+        self.last_reset_kind = "legacy"
         self.start_phase = start_phase
         self.specialist_phase = specialist_phase
         self.reward_mode = reward_mode
@@ -366,9 +364,16 @@ class HopperEnv(gym.Env):
         self.max_climb_ready_time = max_climb_ready_time
         self.climb_ready_min_z = float(climb_ready_min_z)
         self.flip_start_min_z = float(flip_start_min_z)
-        self.flip_start_max_z = float(flip_start_max_z)
+        self.flip_start_max_z = (
+            None if flip_start_max_z is None else float(flip_start_max_z)
+        )
         self.flip_start_min_upright = float(flip_start_min_upright)
         self.flip_start_max_rel_dist = float(flip_start_max_rel_dist)
+        self.flip_start_max_linear_speed = (
+            None
+            if flip_start_max_linear_speed is None
+            else float(flip_start_max_linear_speed)
+        )
         self.flip_start_max_horizontal_speed = float(flip_start_max_horizontal_speed)
         self.flip_start_min_vertical_velocity = float(flip_start_min_vertical_velocity)
         self.flip_start_max_vertical_velocity = float(flip_start_max_vertical_velocity)
@@ -423,15 +428,6 @@ class HopperEnv(gym.Env):
         self.flip_start_roughness = max(float(flip_start_roughness), 0.0)
         self.recovery_start_roughness = max(float(recovery_start_roughness), 0.0)
         self.hover_start_roughness = max(float(hover_start_roughness), 0.0)
-        self.attitude_recovery_test = bool(attitude_recovery_test)
-        self.max_start_tilt_rad = np.deg2rad(max(float(max_start_tilt_deg), 0.0))
-        self.min_start_tilt_rad = np.deg2rad(max(float(min_start_tilt_deg), 0.0))
-        if self.min_start_tilt_rad > self.max_start_tilt_rad:
-            self.min_start_tilt_rad = self.max_start_tilt_rad
-        self.upright_success_cos = float(np.cos(np.deg2rad(max(float(upright_success_deg), 0.0))))
-        self.upright_hold_sec = max(float(upright_hold_sec), 0.0)
-        self.attitude_upright_hold_timer = 0.0
-        self.attitude_anchor_pos = np.zeros(3, dtype=np.float64)
         self.thrust_sensor_id = mujoco.mj_name2id(
             self.model,
             mujoco.mjtObj.mjOBJ_SENSOR,
@@ -486,7 +482,6 @@ class HopperEnv(gym.Env):
         self.last_vertical_velocity = 0.0
         self.hover_timer = 0.0
         self.climb_ready_timer = 0.0
-        self.attitude_upright_hold_timer = 0.0
         self.flip_low_altitude_stall_timer = 0.0
         self.recovery_low_altitude_timer = 0.0
         self.success = False
@@ -502,7 +497,6 @@ class HopperEnv(gym.Env):
         self.last_physics_angular_speed = 0.0
         self.physics_linear_speed_delta = 0.0
         self.physics_angular_speed_delta = 0.0
-        self.last_attitude_tilt_error = 0.0
         self.last_action = np.zeros(3, dtype=np.float32)
         self.last_reward_breakdown = self._empty_reward_breakdown()
 
@@ -532,7 +526,6 @@ class HopperEnv(gym.Env):
         self.last_vertical_velocity = -0.1
         self.hover_timer = 0.0
         self.climb_ready_timer = 0.0
-        self.attitude_upright_hold_timer = 0.0
         self.flip_low_altitude_stall_timer = 0.0
         self.recovery_low_altitude_timer = 0.0
         self.success = False
@@ -545,12 +538,19 @@ class HopperEnv(gym.Env):
         self.last_transition_bonus = 0.0
         self.last_action = np.zeros(3, dtype=np.float32)
         self.last_reward_breakdown = self._empty_reward_breakdown()
-        if self.random_start_z:
+        use_handoff_reset = (
+            self.reset_profile == "handoff-mix"
+            and self.np_random.random() >= self.legacy_reset_probability
+        )
+        self.last_reset_kind = "handoff" if use_handoff_reset else "legacy"
+        if use_handoff_reset and self.start_phase == "climb":
+            self.current_start_z = float(self.np_random.uniform(0.5, 8.0) + 0.355)
+        elif self.random_start_z:
             self.current_start_z = float(self.np_random.uniform(self.min_start_z, self.max_start_z))
         else:
             self.current_start_z = self.start_z
         mujoco.mj_resetData(self.model, self.data)
-        self._apply_start_phase_state()
+        self._apply_start_phase_state(use_handoff_reset=use_handoff_reset)
         self.data.ctrl[:] = 0.0
         self.data.qfrc_applied[:] = 0.0
         self.data.xfrc_applied[:] = 0.0
@@ -560,11 +560,10 @@ class HopperEnv(gym.Env):
         self.last_rel_dist = metrics["rel_dist"]
         self.last_vertical_velocity = metrics["vertical_velocity"]
         self.last_height = metrics["z"]
-        self.last_attitude_tilt_error = self._attitude_tilt_error_rad(metrics)
         self.last_metrics = metrics
         return self.get_observation(), {}
 
-    def _apply_start_phase_state(self):
+    def _apply_start_phase_state(self, use_handoff_reset=False):
         xy = np.zeros(2, dtype=np.float64)
         quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         linear_velocity = np.array([0.0, 0.0, -0.1], dtype=np.float64)
@@ -573,7 +572,33 @@ class HopperEnv(gym.Env):
         tvc_velocity = np.zeros(2, dtype=np.float64)
         z = self.current_start_z
 
-        if self.start_phase == "flip":
+        if use_handoff_reset and self.start_phase == "flip":
+            desired_bottom_z = float(self.np_random.uniform(8.0, 12.0))
+            z = desired_bottom_z + 0.355
+            xy = self.np_random.uniform(-0.25, 0.25, size=2)
+            pitch = self.np_random.uniform(-np.deg2rad(5.0), np.deg2rad(5.0))
+            roll = self.np_random.uniform(-np.deg2rad(5.0), np.deg2rad(5.0))
+            yaw = self.np_random.uniform(-np.deg2rad(5.0), np.deg2rad(5.0))
+            quat = self._quat_multiply(
+                self._quat_from_axis_angle([0.0, 0.0, 1.0], yaw),
+                self._quat_multiply(
+                    self._quat_from_axis_angle([0.0, 1.0, 0.0], pitch),
+                    self._quat_from_axis_angle([1.0, 0.0, 0.0], roll),
+                ),
+            )
+            linear_velocity = np.array([
+                self.np_random.uniform(-0.5, 0.5),
+                self.np_random.uniform(-0.5, 0.5),
+                self.np_random.uniform(-1.0, 1.0),
+            ], dtype=np.float64)
+            angular_velocity = self.np_random.uniform(-0.3, 0.3, size=3).astype(np.float64)
+            if self.np_random.random() < 0.20:
+                tvc_limit = self.max_tvc_angle
+            else:
+                tvc_limit = min(self.max_tvc_angle, np.deg2rad(5.0))
+            tvc_angle = self.np_random.uniform(-tvc_limit, tvc_limit, size=2).astype(np.float64)
+            tvc_velocity = self.np_random.uniform(-0.8, 0.8, size=2).astype(np.float64)
+        elif self.start_phase == "flip":
             roughness = float(np.clip(self.flip_start_roughness, 0.0, 1.0))
             if roughness > 0.0:
                 xy = self.np_random.uniform(-0.25 * roughness, 0.25 * roughness, size=2)
@@ -612,84 +637,126 @@ class HopperEnv(gym.Env):
                     20.0 * roughness,
                     size=2,
                 ).astype(np.float64)
-        elif self.start_phase == "recovery":
-            if self.attitude_recovery_test:
-                xy = np.zeros(2, dtype=np.float64)
-                z = float(self.current_start_z)
-                tilt = float(self.np_random.uniform(self.min_start_tilt_rad, self.max_start_tilt_rad))
-                tilt_direction = float(self.np_random.uniform(-np.pi, np.pi))
-                roll = tilt * np.sin(tilt_direction)
-                pitch = tilt * np.cos(tilt_direction)
-                yaw = float(self.np_random.uniform(-np.deg2rad(5.0), np.deg2rad(5.0)))
-                quat = self._quat_multiply(
-                    self._quat_from_axis_angle([0.0, 0.0, 1.0], yaw),
-                    self._quat_multiply(
-                        self._quat_from_axis_angle([0.0, 1.0, 0.0], pitch),
-                        self._quat_from_axis_angle([1.0, 0.0, 0.0], roll),
-                    ),
-                )
-                linear_velocity = np.zeros(3, dtype=np.float64)
-                angular_velocity = self.np_random.uniform(-0.8, 0.8, size=3).astype(np.float64)
-                angular_velocity[2] *= 0.35
-                self.flip_progress = 1.0
-                self.flip_angle = FULL_FLIP_RAD
-                self.last_step_flip_progress = self.flip_progress
-                tvc_angle = self.np_random.uniform(
-                    -0.25 * self.max_tvc_angle,
-                    0.25 * self.max_tvc_angle,
-                    size=2,
-                ).astype(np.float64)
-                tvc_velocity = self.np_random.uniform(-3.0, 3.0, size=2).astype(np.float64)
+        elif use_handoff_reset and self.start_phase == "recovery":
+            desired_bottom_z = float(self.np_random.uniform(5.5, 10.5))
+            z = desired_bottom_z + 0.355
+            xy = self.np_random.uniform(-1.0, 1.0, size=2)
+            self.flip_progress = float(self.np_random.uniform(0.75, 0.90))
+            self.flip_angle = self.flip_progress * FULL_FLIP_RAD
+            self.last_step_flip_progress = self.flip_progress
+
+            base_flip_quat = self._quat_from_axis_angle(
+                [0.0, 1.0, 0.0],
+                -self.flip_angle,
+            )
+            roll_offset = self.np_random.uniform(-np.deg2rad(8.0), np.deg2rad(8.0))
+            yaw_offset = self.np_random.uniform(-np.deg2rad(8.0), np.deg2rad(8.0))
+            quat = self._quat_multiply(
+                self._quat_from_axis_angle([0.0, 0.0, 1.0], yaw_offset),
+                self._quat_multiply(
+                    base_flip_quat,
+                    self._quat_from_axis_angle([1.0, 0.0, 0.0], roll_offset),
+                ),
+            )
+            linear_velocity = np.array([
+                self.np_random.uniform(-1.5, 1.5),
+                self.np_random.uniform(-1.5, 1.5),
+                self.np_random.uniform(-5.0, 1.0),
+            ], dtype=np.float64)
+            if self.np_random.random() < 0.90:
+                flip_rate = -self.np_random.uniform(0.5, 4.0)
             else:
-                roughness = float(np.clip(self.recovery_start_roughness, 0.0, 2.0))
-                xy_range = 0.25 + 1.25 * roughness
-                xy = self.np_random.uniform(-xy_range, xy_range, size=2)
-                if self.random_start_z:
-                    z = float(self.np_random.uniform(7.5 - 1.5 * roughness, 10.0 + 0.5 * roughness))
-                else:
-                    z = float(self.current_start_z + self.np_random.uniform(-2.5 * roughness, 1.0 * roughness))
-                z = float(np.clip(z, 5.5, 11.0))
+                flip_rate = self.np_random.uniform(-0.5, 0.5)
+            angular_velocity = np.array([
+                self.np_random.uniform(-0.5, 0.5),
+                flip_rate,
+                self.np_random.uniform(-0.5, 0.5),
+            ], dtype=np.float64)
+            tvc_angle = self.np_random.uniform(
+                -self.max_tvc_angle,
+                self.max_tvc_angle,
+                size=2,
+            ).astype(np.float64)
+            tvc_velocity = self.np_random.uniform(-1.0, 1.0, size=2).astype(np.float64)
+        elif self.start_phase == "recovery":
+            roughness = float(np.clip(self.recovery_start_roughness, 0.0, 2.0))
+            xy_range = 0.25 + 1.25 * roughness
+            xy = self.np_random.uniform(-xy_range, xy_range, size=2)
+            if self.random_start_z:
+                z = float(self.np_random.uniform(7.5 - 1.5 * roughness, 10.0 + 0.5 * roughness))
+            else:
+                z = float(self.current_start_z + self.np_random.uniform(-2.5 * roughness, 1.0 * roughness))
+            z = float(np.clip(z, 5.5, 11.0))
 
-                pitch = self.np_random.uniform(-0.25 - 0.35 * roughness, 0.25 + 0.35 * roughness)
-                roll = self.np_random.uniform(-0.25 * roughness, 0.25 * roughness)
-                yaw = self.np_random.uniform(-0.35 * roughness, 0.35 * roughness)
-                quat = self._quat_multiply(
-                    self._quat_from_axis_angle([0.0, 0.0, 1.0], yaw),
-                    self._quat_multiply(
-                        self._quat_from_axis_angle([0.0, 1.0, 0.0], pitch),
-                        self._quat_from_axis_angle([1.0, 0.0, 0.0], roll),
-                    ),
-                )
+            pitch = self.np_random.uniform(-0.25 - 0.35 * roughness, 0.25 + 0.35 * roughness)
+            roll = self.np_random.uniform(-0.25 * roughness, 0.25 * roughness)
+            yaw = self.np_random.uniform(-0.35 * roughness, 0.35 * roughness)
+            quat = self._quat_multiply(
+                self._quat_from_axis_angle([0.0, 0.0, 1.0], yaw),
+                self._quat_multiply(
+                    self._quat_from_axis_angle([0.0, 1.0, 0.0], pitch),
+                    self._quat_from_axis_angle([1.0, 0.0, 0.0], roll),
+                ),
+            )
 
-                horizontal_speed_range = 0.8 + 1.9 * roughness
-                linear_velocity = np.array([
-                    self.np_random.uniform(-horizontal_speed_range, horizontal_speed_range),
-                    self.np_random.uniform(-horizontal_speed_range, horizontal_speed_range),
-                    self.np_random.uniform(-3.0 - 2.0 * roughness, -0.2),
-                ], dtype=np.float64)
-                angular_velocity = np.array([
-                    self.np_random.uniform(-0.2 - 1.6 * roughness, 0.2 + 1.6 * roughness),
-                    self.np_random.uniform(max(0.5, 1.5 - 0.5 * roughness), 4.0 + 3.0 * roughness),
-                    self.np_random.uniform(-0.15 - 0.75 * roughness, 0.15 + 0.75 * roughness),
-                ], dtype=np.float64)
-                self.flip_progress = float(
-                    self.np_random.uniform(
-                        max(0.82, 0.96 - 0.10 * roughness),
-                        min(1.08, 0.96 + 0.10 * roughness),
-                    )
+            horizontal_speed_range = 0.8 + 1.9 * roughness
+            linear_velocity = np.array([
+                self.np_random.uniform(-horizontal_speed_range, horizontal_speed_range),
+                self.np_random.uniform(-horizontal_speed_range, horizontal_speed_range),
+                self.np_random.uniform(-3.0 - 2.0 * roughness, -0.2),
+            ], dtype=np.float64)
+            angular_velocity = np.array([
+                self.np_random.uniform(-0.2 - 1.6 * roughness, 0.2 + 1.6 * roughness),
+                self.np_random.uniform(max(0.5, 1.5 - 0.5 * roughness), 4.0 + 3.0 * roughness),
+                self.np_random.uniform(-0.15 - 0.75 * roughness, 0.15 + 0.75 * roughness),
+            ], dtype=np.float64)
+            self.flip_progress = float(
+                self.np_random.uniform(
+                    max(0.82, 0.96 - 0.10 * roughness),
+                    min(1.08, 0.96 + 0.10 * roughness),
                 )
-                self.flip_angle = self.flip_progress * FULL_FLIP_RAD
-                self.last_step_flip_progress = self.flip_progress
-                tvc_angle = self.np_random.uniform(
-                    -0.7 * self.max_tvc_angle * roughness,
-                    0.7 * self.max_tvc_angle * roughness,
-                    size=2,
-                ).astype(np.float64)
-                tvc_velocity = self.np_random.uniform(
-                    -12.0 * roughness,
-                    12.0 * roughness,
-                    size=2,
-                ).astype(np.float64)
+            )
+            self.flip_angle = self.flip_progress * FULL_FLIP_RAD
+            self.last_step_flip_progress = self.flip_progress
+            tvc_angle = self.np_random.uniform(
+                -0.7 * self.max_tvc_angle * roughness,
+                0.7 * self.max_tvc_angle * roughness,
+                size=2,
+            ).astype(np.float64)
+            tvc_velocity = self.np_random.uniform(
+                -12.0 * roughness,
+                12.0 * roughness,
+                size=2,
+            ).astype(np.float64)
+        elif use_handoff_reset and self.start_phase == "hover":
+            desired_bottom_z = float(self.np_random.uniform(3.5, 6.5))
+            z = desired_bottom_z + 0.355
+            xy = self.np_random.uniform(-0.35, 0.35, size=2)
+            pitch = self.np_random.uniform(-np.deg2rad(8.0), np.deg2rad(8.0))
+            roll = self.np_random.uniform(-np.deg2rad(8.0), np.deg2rad(8.0))
+            yaw = self.np_random.uniform(-np.deg2rad(5.0), np.deg2rad(5.0))
+            quat = self._quat_multiply(
+                self._quat_from_axis_angle([0.0, 0.0, 1.0], yaw),
+                self._quat_multiply(
+                    self._quat_from_axis_angle([0.0, 1.0, 0.0], pitch),
+                    self._quat_from_axis_angle([1.0, 0.0, 0.0], roll),
+                ),
+            )
+            linear_velocity = np.array([
+                self.np_random.uniform(-0.75, 0.75),
+                self.np_random.uniform(-0.75, 0.75),
+                self.np_random.uniform(-1.0, 1.0),
+            ], dtype=np.float64)
+            angular_velocity = self.np_random.uniform(-0.5, 0.5, size=3).astype(np.float64)
+            if self.np_random.random() < 0.20:
+                tvc_limit = self.max_tvc_angle
+            else:
+                tvc_limit = min(self.max_tvc_angle, np.deg2rad(8.5))
+            tvc_angle = self.np_random.uniform(-tvc_limit, tvc_limit, size=2).astype(np.float64)
+            tvc_velocity = self.np_random.uniform(-0.8, 0.8, size=2).astype(np.float64)
+            self.flip_progress = 1.0
+            self.flip_angle = FULL_FLIP_RAD
+            self.last_step_flip_progress = self.flip_progress
         elif self.start_phase == "hover":
             roughness = float(np.clip(self.hover_start_roughness, 0.0, 2.0))
             xy = self.np_random.uniform(-0.35 * roughness, 0.35 * roughness, size=2)
@@ -728,7 +795,6 @@ class HopperEnv(gym.Env):
             ).astype(np.float64)
 
         self.data.qpos[0:3] = np.array([xy[0], xy[1], z], dtype=np.float64)
-        self.attitude_anchor_pos = self.data.qpos[0:3].copy()
         self.data.qpos[3:7] = quat
         self.data.qpos[self.yaw_qpos_id] = tvc_angle[0]
         self.data.qpos[self.pitch_qpos_id] = tvc_angle[1]
@@ -757,18 +823,6 @@ class HopperEnv(gym.Env):
             lw * rz + lx * ry - ly * rx + lz * rw,
         ], dtype=np.float64)
         return quat / max(np.linalg.norm(quat), 1e-8)
-
-    @staticmethod
-    def _attitude_tilt_error_rad_from_upright(upright_score):
-        return float(np.arccos(np.clip(float(upright_score), -1.0, 1.0)))
-
-    def _attitude_tilt_error_rad(self, metrics):
-        return self._attitude_tilt_error_rad_from_upright(metrics["upright_score"])
-
-    def _apply_attitude_recovery_anchor(self):
-        self.data.qpos[0:3] = self.attitude_anchor_pos
-        self.data.qvel[0:3] = 0.0
-        mujoco.mj_forward(self.model, self.data)
 
     def _reset_flip_tracking(self):
         self.flip_angle = 0.0
@@ -800,8 +854,6 @@ class HopperEnv(gym.Env):
         for _ in range(self.frame_skip):
             self._apply_controls(main, yaw_ctrl, pitch_ctrl)
             mujoco.mj_step(self.model, self.data)
-            if self.attitude_recovery_test:
-                self._apply_attitude_recovery_anchor()
             if self._has_surface_contact():
                 self.surface_contact = True
                 if self.current_phase == "flip":
@@ -870,35 +922,15 @@ class HopperEnv(gym.Env):
             reward -= self.reward_weights["failure_penalty"]
             terminated = True
             truncated = False
-        if (
-            truncated
-            and not terminated
-            and self.attitude_recovery_test
-            and self.current_phase == "recovery"
-        ):
-            self.fail = True
-            self.fail_reason = "attitude_recovery_timeout"
-            reward -= self.reward_weights["failure_penalty"]
-            terminated = True
-            truncated = False
         self.last_step_flip_progress = self.flip_progress
         self.last_rel_dist = metrics["rel_dist"]
         self.last_vertical_velocity = metrics["vertical_velocity"]
         self.last_height = metrics["z"]
-        self.last_attitude_tilt_error = self._attitude_tilt_error_rad(metrics)
         self.last_action = current_action
         return obs, float(reward), terminated, truncated, self.get_info()
 
     def _update_specialist_success(self, phase_before_transition):
         if self.specialist_phase is None or self.fail:
-            return
-        if (
-            self.attitude_recovery_test
-            and self.specialist_phase == "recovery"
-            and self.success
-        ):
-            self.specialist_success = True
-            self.specialist_handoff_phase = "upright_hold"
             return
         if self.specialist_phase == "hover":
             if self.success:
@@ -951,7 +983,8 @@ class HopperEnv(gym.Env):
         metrics = self.last_metrics if self.last_metrics is not None else self._compute_metrics()
         info.update({
             "reward_mode": self.reward_mode,
-            "attitude_recovery_test": bool(self.attitude_recovery_test),
+            "reset_profile": self.reset_profile,
+            "reset_kind": self.last_reset_kind,
             "specialist_phase": self.specialist_phase or "",
             "specialist_success": bool(self.specialist_success),
             "specialist_handoff_phase": self.specialist_handoff_phase,
@@ -967,8 +1000,6 @@ class HopperEnv(gym.Env):
             "climb_ready_timer": float(self.climb_ready_timer),
             "flip_low_altitude_stall_timer": float(self.flip_low_altitude_stall_timer),
             "recovery_low_altitude_timer": float(self.recovery_low_altitude_timer),
-            "attitude_upright_hold_timer": float(self.attitude_upright_hold_timer),
-            "attitude_tilt_deg": float(np.rad2deg(self._attitude_tilt_error_rad(metrics))),
             "upright_score": float(metrics["upright_score"]),
             "rel_dist": float(metrics["rel_dist"]),
             "linear_speed": float(metrics["v"]),
@@ -1218,9 +1249,6 @@ class HopperEnv(gym.Env):
         return breakdown["reward_dense_total"], False
 
     def _compute_dense_breakdown(self, metrics, action):
-        if self.attitude_recovery_test and self.current_phase == "recovery":
-            return self._compute_attitude_recovery_breakdown(metrics, action)
-
         rw = self.reward_weights
         main_action = float(action[0])
         tvc_action = action[1:3]
@@ -1295,19 +1323,27 @@ class HopperEnv(gym.Env):
         climb_velocity_score = float(
             climb_phase * climb_upward_speed_score * horizontal_speed_score * climb_angular_score
         )
-        climb_handoff_target_z = 0.5 * (self.flip_start_min_z + self.flip_start_max_z)
-        climb_handoff_half_band = max(0.5 * (self.flip_start_max_z - self.flip_start_min_z), 0.5)
-        climb_handoff_band_score = float(
-            np.exp(-(((z - climb_handoff_target_z) / climb_handoff_half_band) ** 2))
+        climb_handoff_target_z = self.flip_target_z
+        climb_handoff_distance = abs(z - climb_handoff_target_z)
+        climb_handoff_band_score = float(np.exp(-((climb_handoff_distance / 1.0) ** 2)))
+        target_vertical_velocity = float(
+            np.clip((climb_handoff_target_z - z) / 3.0, 0.0, 1.6)
         )
-        climb_handoff_vertical_score = float(np.exp(-(((metrics["vertical_velocity"] - 0.5) / 1.5) ** 2)))
+        climb_handoff_vertical_score = float(
+            np.exp(-(((metrics["vertical_velocity"] - target_vertical_velocity) / 1.2) ** 2))
+        )
+        climb_handoff_linear_limit = (
+            self.flip_start_max_linear_speed
+            if self.flip_start_max_linear_speed is not None
+            else 2.0
+        )
         climb_handoff_score = float(
             climb_phase
             * climb_handoff_band_score
             * climb_handoff_vertical_score
             * upright_score
             * np.exp(-((rel_dist / max(self.flip_start_max_rel_dist, 1e-8)) ** 2))
-            * np.exp(-((metrics["horizontal_speed"] / max(self.flip_start_max_horizontal_speed, 1e-8)) ** 2))
+            * np.exp(-((v / max(climb_handoff_linear_limit, 1e-8)) ** 2))
             * np.exp(-((w / max(self.flip_start_max_angular_speed, 1e-8)) ** 2))
             * np.exp(-((metrics["tvc_angle"] / max(self.flip_start_max_tvc_angle, 1e-8)) ** 2))
             * np.exp(-((metrics["joint_speed"] / max(self.flip_start_max_joint_speed, 1e-8)) ** 2))
@@ -1469,7 +1505,7 @@ class HopperEnv(gym.Env):
         if climb_phase > 0.0 and z >= self.climb_ready_min_z and upright_score > 0.85:
             climb_ready_dwell_penalty = float(self.climb_ready_timer * rw.get("climb_ready_dwell", 25.0))
         climb_excess_upward_speed = max(
-            metrics["vertical_velocity"] - self.flip_start_max_vertical_velocity,
+            metrics["vertical_velocity"] - (target_vertical_velocity + 0.5),
             0.0,
         )
         climb_excess_upward_penalty = float(
@@ -1478,11 +1514,13 @@ class HopperEnv(gym.Env):
             * (climb_excess_upward_speed * climb_excess_upward_speed)
             / (climb_excess_upward_speed * climb_excess_upward_speed + 9.0)
         )
-        climb_descent_speed = max(-metrics["vertical_velocity"] - 0.5, 0.0)
-        climb_low_altitude_scale = float(np.clip((self.flip_start_min_z - z) / 4.0, 0.0, 1.0))
+        climb_descent_speed = max(-metrics["vertical_velocity"] - 0.1, 0.0)
+        climb_target_proximity_scale = float(
+            np.clip(1.0 - abs(self.flip_target_z - z) / 5.0, 0.0, 1.0)
+        )
         climb_descent_penalty = float(
             climb_phase
-            * climb_low_altitude_scale
+            * climb_target_proximity_scale
             * (1.0 - main_action)
             * (climb_descent_speed * climb_descent_speed)
             / (climb_descent_speed * climb_descent_speed + 4.0)
@@ -1541,55 +1579,6 @@ class HopperEnv(gym.Env):
             value
             for key, value in breakdown.items()
             if key != "reward_dense_total" and key not in compatibility_log_keys
-        ))
-        return breakdown
-
-    def _compute_attitude_recovery_breakdown(self, metrics, action):
-        rw = self.reward_weights
-        breakdown = self._empty_reward_breakdown()
-        tvc_action = action[1:3]
-        last_tvc_action = self.last_action[1:3]
-        main_action = float(action[0])
-        tilt_error = self._attitude_tilt_error_rad(metrics)
-        tilt_progress = max(self.last_attitude_tilt_error - tilt_error, 0.0)
-        success_tilt = max(np.arccos(self.upright_success_cos), np.deg2rad(1.0))
-        upright_window = max(3.0 * success_tilt, np.deg2rad(12.0))
-        upright_score = float(np.exp(-((tilt_error / upright_window) ** 2)))
-        angular_score = float(np.exp(-((metrics["w"] / 1.0) ** 2)))
-        hold_fraction = float(np.clip(self.attitude_upright_hold_timer / max(self.upright_hold_sec, 1e-8), 0.0, 1.0))
-
-        tvc_angle = float(np.linalg.norm([
-            self.data.qpos[self.yaw_qpos_id],
-            self.data.qpos[self.pitch_qpos_id],
-        ]))
-        tvc_velocity_norm = metrics["joint_speed"] / 12.0
-        tvc_action_smoothness_penalty = float(np.mean(np.square(tvc_action - last_tvc_action)))
-        control_effort_penalty = float(0.35 * main_action * main_action + 0.65 * np.mean(np.square(tvc_action)))
-        angular_penalty = float((metrics["w"] * metrics["w"]) / (metrics["w"] * metrics["w"] + 4.0))
-        yaw_spin_penalty = float(abs(metrics["world_z_spin"]) / (abs(metrics["world_z_spin"]) + 2.0))
-        tvc_angle_penalty = float((tvc_angle / max(self.max_tvc_angle, 1e-8)) ** 2)
-        tvc_velocity_penalty = float(tvc_velocity_norm * tvc_velocity_norm)
-        tilt_fail_scale = float(np.clip((tilt_error - self.max_start_tilt_rad) / np.deg2rad(25.0), 0.0, 1.0))
-
-        breakdown["reward_upright_score"] = 4.0 * rw["dense_upright"] * upright_score
-        breakdown["reward_upright_hold_score"] = rw["dense_upright_hold"] * (
-            8.0 * tilt_progress + 2.0 * hold_fraction
-        )
-        breakdown["reward_velocity_score"] = 1.5 * rw["dense_velocity"] * angular_score
-        breakdown["reward_recovery_handoff_score"] = (
-            rw["dense_recovery_handoff"] * upright_score * angular_score
-        )
-        breakdown["penalty_angular"] = -2.0 * rw["dense_angular"] * angular_penalty
-        breakdown["penalty_yaw_spin"] = -rw["dense_yaw_spin"] * yaw_spin_penalty
-        breakdown["penalty_control_effort"] = -rw["dense_control_effort"] * control_effort_penalty
-        breakdown["penalty_tvc_action_smoothness"] = (
-            -rw["dense_action_smoothness"] * tvc_action_smoothness_penalty
-        )
-        breakdown["penalty_tvc_angle"] = -rw["dense_tvc_angle"] * tvc_angle_penalty
-        breakdown["penalty_tvc_velocity"] = -rw["dense_tvc_velocity"] * tvc_velocity_penalty
-        breakdown["penalty_safety"] = -rw["dense_safety"] * tilt_fail_scale
-        breakdown["reward_dense_total"] = float(sum(
-            value for key, value in breakdown.items() if key != "reward_dense_total"
         ))
         return breakdown
 
@@ -1823,9 +1812,17 @@ class HopperEnv(gym.Env):
 
     def _is_ready_for_flip(self, metrics):
         return bool(
-            self.flip_start_min_z <= metrics["z"] <= self.flip_start_max_z
+            metrics["z"] >= self.flip_start_min_z
+            and (
+                self.flip_start_max_z is None
+                or metrics["z"] <= self.flip_start_max_z
+            )
             and metrics["upright_score"] > self.flip_start_min_upright
             and metrics["rel_dist"] <= self.flip_start_max_rel_dist
+            and (
+                self.flip_start_max_linear_speed is None
+                or metrics["v"] <= self.flip_start_max_linear_speed
+            )
             and metrics["horizontal_speed"] <= self.flip_start_max_horizontal_speed
             and self.flip_start_min_vertical_velocity
             <= metrics["vertical_velocity"]
@@ -1879,15 +1876,6 @@ class HopperEnv(gym.Env):
         if self._has_bad_physics():
             self.fail_reason = "bad_physics"
             return True
-        if self.attitude_recovery_test and self.current_phase == "recovery":
-            tilt_error = self._attitude_tilt_error_rad(metrics)
-            if tilt_error > np.deg2rad(70.0):
-                self.fail_reason = "attitude_tilt_escape"
-                return True
-            if w > 25.0:
-                self.fail_reason = "attitude_angular_speed"
-                return True
-            return False
         if self.surface_contact or z < 0.08:
             self.fail_reason = "flip_surface_contact" if self.current_phase == "flip" else "surface_contact"
             return True
@@ -1964,13 +1952,6 @@ class HopperEnv(gym.Env):
             if self.specialist_phase == "flip":
                 return "flip_progress_timeout"
         if self.current_phase == "recovery":
-            if self.attitude_recovery_test:
-                tilt_error = self._attitude_tilt_error_rad(metrics)
-                if tilt_error > np.deg2rad(70.0):
-                    return "attitude_tilt_escape"
-                if metrics["w"] > 25.0:
-                    return "attitude_angular_speed"
-                return "attitude_recovery_timeout"
             if metrics["rel_dist"] > self.recovery_max_rel_dist:
                 return "recovery_target_escape"
         if self.current_phase == "hover":
@@ -2015,21 +1996,6 @@ class HopperEnv(gym.Env):
                 )
 
         if self.current_phase == "recovery":
-            if self.attitude_recovery_test:
-                dt = self.model.opt.timestep * self.frame_skip
-                stable = (
-                    metrics["upright_score"] >= self.upright_success_cos
-                    and metrics["w"] <= 1.0
-                    and metrics["joint_speed"] <= 4.0
-                )
-                if stable:
-                    self.attitude_upright_hold_timer += dt
-                else:
-                    self.attitude_upright_hold_timer = 0.0
-                if self.attitude_upright_hold_timer >= self.upright_hold_sec:
-                    self.success = True
-                    self.current_phase = "done"
-                return 0.0
             if self._is_ready_for_hover(metrics):
                 self.current_phase = "hover"
                 self.hover_timer = 0.0

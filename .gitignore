@@ -1,11 +1,13 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-mjx/
 venv/
 env/
 .env
 .env.*
 telegram_secrets.json
+configs/telegram_secrets.json
 telegram_*.secret.json
 
 MUJOCO_LOG.TXT
@@ -16,6 +18,9 @@ runs/
 training_logs/
 model_backups/
 archive_unused/
+artifacts/
+packages/
+firmware/
 BestModels/
 BestModels*.zip
 sac_*_golden.zip
@@ -24,6 +29,8 @@ __pycache__/
 *_hopper_*.zip
 *_latest.zip
 *.csv
+*.png
+*.mp4
 *.tmp
 phase_models.json
 test_runs/

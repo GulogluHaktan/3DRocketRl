@@ -1,0 +1,6 @@
+{
+  "climb": "runs/<climb_run>/sac_hopper_accepted.zip",
+  "flip": "runs/<flip_run>/sac_hopper_accepted.zip",
+  "recovery": "runs/<recovery_run>/sac_hopper_accepted.zip",
+  "hover": "runs/<hover_run>/sac_hopper_accepted.zip"
+}

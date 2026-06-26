@@ -1,7 +1,0 @@
-{
-  "climb": "runs/sac_climb_<run>/sac_hopper_latest.zip",
-  "flip": "runs/sac_flip_<run>/sac_hopper_latest.zip",
-  "recovery": "runs/sac_recovery_<run>/sac_hopper_latest.zip",
-  "hover": "runs/sac_hover_<run>/sac_hopper_latest.zip",
-  "fallback_flip": "runs/sac_hopper_20260603_152230/sac_hopper_latest.zip"
-}

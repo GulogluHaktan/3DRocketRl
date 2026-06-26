@@ -317,6 +317,7 @@ def _train_single(args):
                 episode_length=args.episode_length,
                 max_thrust=args.max_thrust,
                 max_tvc_deg=args.max_tvc_deg,
+                specialist_phase=getattr(args, "specialist_phase", None),
             )
             network_factory = functools.partial(
                 networks.make_sac_networks,
@@ -435,7 +436,11 @@ def evaluate(args):
     jax, jp, checkpoint, _, _ = _require_jax()
     checkpoint_path = _resolve_checkpoint(args.model)
     policy = checkpoint.load_policy(checkpoint_path, deterministic=True)
-    env = RocketMJXEnv(curriculum_stage=3, episode_length=args.episode_length)
+    env = RocketMJXEnv(
+        curriculum_stage=3,
+        episode_length=args.episode_length,
+        specialist_phase=getattr(args, "specialist_phase", None),
+    )
     num_envs = int(args.episodes)
     keys = jax.random.split(jax.random.key(args.seed), num_envs)
     state = jax.jit(jax.vmap(env.reset))(keys)
@@ -444,6 +449,7 @@ def evaluate(args):
     active = jp.ones((num_envs,), dtype=jp.bool_)
     ever_success = jp.zeros((num_envs,), dtype=jp.bool_)
     transition_max = jp.zeros((num_envs, 4))
+    fail_codes = jp.zeros((num_envs,), dtype=jp.float32)
 
     for _ in range(args.episode_length):
         action, _ = policy(state.obs, policy_keys)
@@ -452,11 +458,39 @@ def evaluate(args):
         transition_max = jp.maximum(
             transition_max, next_state.pipeline_state.transition_mask
         )
+        fail_codes = jp.where(
+            active & next_state.pipeline_state.fail,
+            next_state.pipeline_state.fail_reason_code,
+            fail_codes
+        )
         active = active & ~next_state.done.astype(jp.bool_)
         state = next_state
         if not bool(jp.any(active)):
             break
     jax.block_until_ready(state.obs)
+
+    FAIL_REASONS_MAP = {
+        0.0: "none",
+        1.0: "bad_physics",
+        2.0: "climb_xy_escape",
+        3.0: "climb_ready_timeout",
+        4.0: "flip_surface_contact",
+        5.0: "flip_xy_escape",
+        6.0: "recovery_target_escape",
+        7.0: "hover_target_escape",
+        8.0: "hover_speed_limit",
+        9.0: "surface_contact",
+        10.0: "climb_speed_limit",
+        11.0: "flip_speed_limit",
+        12.0: "recovery_speed_limit",
+        13.0: "speed_limit",
+    }
+    import numpy as np
+    fail_reasons = {}
+    for code in np.asarray(fail_codes):
+        reason = FAIL_REASONS_MAP.get(float(code), "unknown")
+        fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+
     report = {
         "checkpoint": str(checkpoint_path),
         "episodes": num_envs,
@@ -495,6 +529,7 @@ def evaluate(args):
                 state.pipeline_state.transition_angular_speed, axis=0
             )
         ],
+        "fail_reasons": fail_reasons,
     }
     report["accepted"] = bool(
         report["climb_handoff_rate"] >= 0.90
@@ -513,6 +548,7 @@ def _make_classic_env(args):
     from hopper_env import HopperEnv
     return HopperEnv(
         start_phase="climb",
+        specialist_phase=getattr(args, "specialist_phase", None),
         start_z=2.0,
         random_start_z=True,
         min_start_z=0.5,
@@ -561,6 +597,8 @@ def _evaluate_classic(args):
                 ], dtype=np.float32)
                 obs, _, terminated, truncated, final_info = env.step(classic_action)
                 seen.add(final_info.get("phase", ""))
+                if final_info.get("specialist_handoff_phase"):
+                    seen.add(final_info.get("specialist_handoff_phase"))
                 if terminated or truncated:
                     break
             successes += int(bool(final_info.get("success")))

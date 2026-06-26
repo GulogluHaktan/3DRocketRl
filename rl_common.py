@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import csv
+import copy
 import glob
+import hashlib
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -61,10 +64,9 @@ EXTRA_INFO_KEYS = (
     "ready_for_recovery",
     "ready_for_hover",
     "hover_stable",
-    "attitude_recovery_test",
-    "attitude_upright_hold_timer",
-    "attitude_tilt_deg",
     "reward_mode",
+    "reset_profile",
+    "reset_kind",
     *REWARD_BREAKDOWN_KEYS,
 )
 
@@ -82,14 +84,11 @@ def make_env(args, reward_weights=None, env_kwargs=None):
         "random_start_z": args.random_start_z or not args.fixed_start_z,
         "min_start_z": args.min_start_z,
         "max_start_z": args.max_start_z,
+        "reset_profile": getattr(args, "reset_profile", "legacy"),
+        "legacy_reset_probability": getattr(args, "legacy_reset_probability", 0.30),
         "start_phase": args.start_phase,
         "specialist_phase": getattr(args, "specialist_phase", None),
         "reward_weights": reward_weights,
-        "attitude_recovery_test": getattr(args, "attitude_recovery_test", False),
-        "max_start_tilt_deg": getattr(args, "max_start_tilt_deg", 45.0),
-        "min_start_tilt_deg": getattr(args, "min_start_tilt_deg", 5.0),
-        "upright_success_deg": getattr(args, "upright_success_deg", 5.0),
-        "upright_hold_sec": getattr(args, "upright_hold_sec", 1.0),
     }
     if env_kwargs:
         config.update(env_kwargs)
@@ -121,15 +120,33 @@ class HandoffStartWrapper(gym.Wrapper):
         target_phase,
         max_steps=600,
         attempts=20,
+        handoff_probability=1.0,
     ):
         super().__init__(env)
         self.handoff_model = handoff_model
         self.target_phase = target_phase
         self.max_steps = int(max_steps)
         self.attempts = int(attempts)
+        self.handoff_probability = float(np.clip(handoff_probability, 0.0, 1.0))
         self.last_handoff_info = {}
 
     def reset(self, **kwargs):
+        if self.env.unwrapped.np_random.random() >= self.handoff_probability:
+            original_phase = self.env.unwrapped.start_phase
+            self.env.unwrapped.start_phase = self.target_phase
+            try:
+                obs, info = self.env.reset(**kwargs)
+            finally:
+                self.env.unwrapped.start_phase = original_phase
+            self.last_handoff_info = {
+                "handoff_used": False,
+                "handoff_attempt": 0,
+                "handoff_steps": 0,
+                "handoff_phase": self.env.current_phase,
+                "handoff_reward": 0.0,
+                "handoff_active_model_sequence": "synthetic",
+            }
+            return obs, {**info, **self.last_handoff_info}
         last_info = {}
         for attempt in range(1, max(self.attempts, 1) + 1):
             reset_kwargs = dict(kwargs)
@@ -192,6 +209,7 @@ class PhaseChainHandoffStartWrapper(gym.Wrapper):
         target_phase,
         max_steps=1200,
         attempts=20,
+        handoff_probability=1.0,
     ):
         super().__init__(env)
         self.phase_models = phase_models
@@ -199,9 +217,26 @@ class PhaseChainHandoffStartWrapper(gym.Wrapper):
         self.target_phase = target_phase
         self.max_steps = int(max_steps)
         self.attempts = int(attempts)
+        self.handoff_probability = float(np.clip(handoff_probability, 0.0, 1.0))
         self.last_handoff_info = {}
 
     def reset(self, **kwargs):
+        if self.env.unwrapped.np_random.random() >= self.handoff_probability:
+            original_phase = self.env.unwrapped.start_phase
+            self.env.unwrapped.start_phase = self.target_phase
+            try:
+                obs, info = self.env.reset(**kwargs)
+            finally:
+                self.env.unwrapped.start_phase = original_phase
+            self.last_handoff_info = {
+                "handoff_used": False,
+                "handoff_attempt": 0,
+                "handoff_steps": 0,
+                "handoff_phase": self.env.current_phase,
+                "handoff_reward": 0.0,
+                "handoff_active_model_sequence": "synthetic",
+            }
+            return obs, {**info, **self.last_handoff_info}
         last_info = {}
         for attempt in range(1, max(self.attempts, 1) + 1):
             reset_kwargs = dict(kwargs)
@@ -308,6 +343,117 @@ def make_run_dir(algo_name, base_dir="runs", specialist_phase=None):
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
     return run_dir
+
+
+HANDOFF_ACCEPTANCE_THRESHOLDS = {
+    "climb": 0.90,
+    "flip": 0.85,
+    "recovery": 0.85,
+    "hover": 0.90,
+}
+
+
+def evaluate_specialist_policy(
+    model,
+    args,
+    specialist_phase,
+    episodes,
+    reset_profile,
+    reward_weights=None,
+    env_kwargs=None,
+):
+    eval_args = copy.copy(args)
+    eval_args.start_phase = specialist_phase
+    eval_args.specialist_phase = specialist_phase
+    eval_args.reset_profile = reset_profile
+    eval_args.legacy_reset_probability = 0.0 if reset_profile == "handoff-mix" else 1.0
+    eval_args.fixed_start_z = True
+    eval_args.random_start_z = False
+    eval_args.start_z = {
+        "climb": 2.0,
+        "flip": 10.0,
+        "recovery": 9.0,
+        "hover": 5.0,
+    }[specialist_phase]
+    env = make_env(eval_args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+    successes = 0
+    rewards = []
+    try:
+        for episode_index in range(max(int(episodes), 1)):
+            obs, _ = env.reset(seed=10_000 + episode_index)
+            episode_reward = 0.0
+            final_info = {}
+            for _ in range(env.max_steps):
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, final_info = env.step(action)
+                episode_reward += float(reward)
+                if terminated or truncated:
+                    break
+            successes += int(
+                bool(final_info.get("specialist_success") or final_info.get("success"))
+            )
+            rewards.append(episode_reward)
+    finally:
+        env.close()
+    episode_count = max(int(episodes), 1)
+    return {
+        "episodes": episode_count,
+        "success_rate": successes / episode_count,
+        "mean_reward": float(np.mean(rewards)) if rewards else 0.0,
+    }
+
+
+def run_handoff_acceptance(
+    model,
+    baseline_model,
+    args,
+    specialist_phase,
+    reward_weights=None,
+    env_kwargs=None,
+):
+    episodes = max(int(getattr(args, "acceptance_episodes", 100)), 1)
+    baseline_legacy = evaluate_specialist_policy(
+        baseline_model,
+        args,
+        specialist_phase,
+        episodes,
+        "legacy",
+        reward_weights,
+        env_kwargs,
+    )
+    candidate_legacy = evaluate_specialist_policy(
+        model,
+        args,
+        specialist_phase,
+        episodes,
+        "legacy",
+        reward_weights,
+        env_kwargs,
+    )
+    candidate_handoff = evaluate_specialist_policy(
+        model,
+        args,
+        specialist_phase,
+        episodes,
+        "handoff-mix",
+        reward_weights,
+        env_kwargs,
+    )
+    randomized_threshold = HANDOFF_ACCEPTANCE_THRESHOLDS[specialist_phase]
+    legacy_floor = max(baseline_legacy["success_rate"] - 0.05, 0.0)
+    accepted = (
+        candidate_legacy["success_rate"] >= legacy_floor
+        and candidate_handoff["success_rate"] >= randomized_threshold
+    )
+    return {
+        "phase": specialist_phase,
+        "accepted": accepted,
+        "legacy_floor": legacy_floor,
+        "randomized_threshold": randomized_threshold,
+        "baseline_legacy": baseline_legacy,
+        "candidate_legacy": candidate_legacy,
+        "candidate_handoff": candidate_handoff,
+    }
 
 
 def format_duration(seconds):
@@ -502,6 +648,9 @@ def train_loop(
     (run_dir / "checkpoints").mkdir(exist_ok=True)
 
     env = make_env(args, reward_weights=reward_weights, env_kwargs=env_kwargs)
+    handoff_probability = (
+        0.50 if getattr(args, "reset_profile", "legacy") == "handoff-mix" else 1.0
+    )
     handoff_model = None
     handoff_phase_models = None
     handoff_phase_paths = None
@@ -517,6 +666,7 @@ def train_loop(
             target_phase=args.specialist_phase,
             max_steps=getattr(args, "handoff_max_steps", 600),
             attempts=getattr(args, "handoff_attempts", 20),
+            handoff_probability=handoff_probability,
         )
         print(
             "[Handoff] acik: "
@@ -539,6 +689,7 @@ def train_loop(
             target_phase=args.specialist_phase,
             max_steps=getattr(args, "handoff_max_steps", 1200),
             attempts=getattr(args, "handoff_attempts", 20),
+            handoff_probability=handoff_probability,
         )
         print(
             "[Phase Handoff] acik: "
@@ -561,19 +712,38 @@ def train_loop(
                 flush=True,
             )
     specialist_phase = getattr(args, "specialist_phase", None)
-    root_model = (
+    root_model_name = (
         f"{algo_name}_{specialist_phase}_latest.zip"
         if specialist_phase
         else f"{algo_name}_hopper_latest.zip"
     )
-    run_model = run_dir / root_model
+    published_model = Path("models/current") / root_model_name
+    published_model.parent.mkdir(parents=True, exist_ok=True)
+    run_model = run_dir / root_model_name
     run_compat_model = run_dir / f"{algo_name}_hopper_latest.zip"
 
     if args.resume:
+        source_path = Path(args.resume).resolve()
+        source_backup = run_dir / "source_model_immutable.zip"
+        source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if source_backup.exists():
+            backup_digest = hashlib.sha256(source_backup.read_bytes()).hexdigest()
+            if backup_digest != source_digest:
+                raise ValueError(
+                    f"{run_dir} farkli bir kaynak modelin immutable yedegini iceriyor."
+                )
+        else:
+            shutil.copy2(source_path, source_backup)
+            source_backup.chmod(0o444)
+            (run_dir / "source_model.sha256").write_text(
+                f"{source_digest}  {source_backup.name}\n"
+            )
         model = Algorithm.load(args.resume, env=env, device="cpu")
+        baseline_model = Algorithm.load(args.resume, device="cpu")
         print(f"{algo_name.upper()} modeli devam ediyor: {args.resume}")
     else:
         model = Algorithm("MlpPolicy", env, verbose=1, device="cpu", **model_kwargs)
+        baseline_model = None
         print(f"{algo_name.upper()} modeli sifirdan basliyor.")
 
     remaining = args.timesteps
@@ -602,6 +772,7 @@ def train_loop(
         )
 
     last_video_step = 0
+    last_acceptance_step = 0
     while remaining > 0:
         chunk_steps = min(args.chunk_steps, remaining)
         chunk_index += 1
@@ -633,19 +804,79 @@ def train_loop(
         if run_compat_model != run_model:
             model.save(run_compat_model)
         
-        # Preserve golden flip model if it exists in root
-        if root_model == f"{algo_name}_flip_latest.zip" and Path(root_model).exists():
-            golden_backup = Path(root_model).parent / f"{algo_name}_flip_latest_golden.zip"
+        # Preserve the published golden flip model.
+        if (
+            published_model.name == f"{algo_name}_flip_latest.zip"
+            and published_model.exists()
+        ):
+            golden_backup = (
+                published_model.parent / f"{algo_name}_flip_latest_golden.zip"
+            )
             if not golden_backup.exists():
-                import shutil
                 try:
-                    shutil.copy2(root_model, golden_backup)
+                    shutil.copy2(published_model, golden_backup)
                     print(f"Golden flip model backed up to: {golden_backup}", flush=True)
                 except Exception as exc:
                     print(f"Golden flip model backup hatasi: {exc}", flush=True)
 
-        model.save(root_model)
+        handoff_acceptance_enabled = bool(
+            specialist_phase
+            and baseline_model is not None
+            and getattr(args, "reset_profile", "legacy") == "handoff-mix"
+        )
+        if getattr(args, "publish_root_model", False) and not handoff_acceptance_enabled:
+            model.save(published_model)
+            print(f"Aktif model yayinlandi: {published_model}", flush=True)
         print(f"\nCheckpoint kaydedildi: {checkpoint}")
+
+        acceptance_every = max(int(getattr(args, "acceptance_eval_every", 25_000)), 1)
+        completed_session_steps = model.num_timesteps - session_start_steps
+        if (
+            handoff_acceptance_enabled
+            and completed_session_steps - last_acceptance_step >= acceptance_every
+        ):
+            last_acceptance_step = completed_session_steps
+            report = run_handoff_acceptance(
+                model,
+                baseline_model,
+                args,
+                specialist_phase,
+                reward_weights,
+                env_kwargs,
+            )
+            report["model_num_timesteps"] = int(model.num_timesteps)
+            report_path = run_dir / "acceptance_report.json"
+            history = []
+            if report_path.exists():
+                try:
+                    history = json.loads(report_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    history = []
+            history.append(report)
+            report_path.write_text(json.dumps(history, indent=2) + "\n")
+            print(
+                "[HANDOFF ACCEPTANCE]",
+                {
+                    "phase": specialist_phase,
+                    "accepted": report["accepted"],
+                    "legacy": round(report["candidate_legacy"]["success_rate"], 3),
+                    "legacy_floor": round(report["legacy_floor"], 3),
+                    "randomized": round(report["candidate_handoff"]["success_rate"], 3),
+                    "randomized_threshold": report["randomized_threshold"],
+                },
+                flush=True,
+            )
+            if report["accepted"]:
+                accepted_path = run_dir / f"{algo_name}_hopper_accepted.zip"
+                phase_accepted_path = run_dir / f"{algo_name}_{specialist_phase}_accepted.zip"
+                model.save(accepted_path)
+                model.save(phase_accepted_path)
+                if getattr(args, "publish_root_model", False):
+                    model.save(published_model)
+                    print(
+                        f"Kabul edilen aktif model yayinlandi: {published_model}",
+                        flush=True,
+                    )
 
         # Headless video generation
         video_every = getattr(args, "telegram_video_every", 100_000)
@@ -787,11 +1018,16 @@ def make_phase_models_config(
 
 
 def find_latest_specialist_model(runs_dir, algo_name, phase):
-    candidates = []
+    accepted_candidates = []
+    latest_candidates = []
     for run_dir in runs_dir.glob(f"{algo_name}_{phase}_*"):
-        model_path = run_dir / f"{algo_name}_hopper_latest.zip"
-        if model_path.exists():
-            candidates.append(model_path)
+        accepted_path = run_dir / f"{algo_name}_hopper_accepted.zip"
+        latest_path = run_dir / f"{algo_name}_hopper_latest.zip"
+        if accepted_path.exists():
+            accepted_candidates.append(accepted_path)
+        elif latest_path.exists():
+            latest_candidates.append(latest_path)
+    candidates = accepted_candidates or latest_candidates
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
@@ -815,7 +1051,9 @@ def watch_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=None
     obs, _ = env.reset()
     phase_models = None
     phase_paths = None
-    model_path = args.model or f"{algo_name}_hopper_latest.zip"
+    model_path = args.model or str(
+        Path("models/current") / f"{algo_name}_hopper_latest.zip"
+    )
     if getattr(args, "phase_models_config", None):
         phase_models, phase_paths = load_phase_models(args.phase_models_config, Algorithm, env)
         model = None
@@ -1023,6 +1261,11 @@ def evaluate_model(args, algo_name, Algorithm, reward_weights=None, env_kwargs=N
                     "fail_reason": final_info.get("fail_reason"),
                     "phase_sequence": ">".join(phase_sequence),
                     "active_model_sequence": ">".join(active_model_sequence),
+                    "chain_success": bool(
+                        phase_models is not None
+                        and final_info.get("success")
+                        and active_model_sequence == list(PHASE_MODEL_KEYS)
+                    ),
                     "max_flip_progress": round(max_flip_progress, 3),
                     "final_flip_progress": round(float(final_info.get("flip_progress", 0.0)), 3),
                     "max_axis_rate": round(max_axis_rate, 3),
@@ -1058,7 +1301,12 @@ def resolve_eval_model_paths(args, algo_name):
         latest_path = run_dir / f"{algo_name}_hopper_latest.zip"
         model_paths = checkpoint_paths or ([latest_path] if latest_path.exists() else [])
     else:
-        model_paths = [Path(args.model or f"{algo_name}_hopper_latest.zip")]
+        model_paths = [
+            Path(
+                args.model
+                or Path("models/current") / f"{algo_name}_hopper_latest.zip"
+            )
+        ]
 
     model_paths = [path for path in model_paths if path.exists()]
     if not model_paths:
@@ -1078,6 +1326,7 @@ def print_eval_summary(label, summaries):
         return
     successes = sum(1 for item in summaries if item["success"])
     specialist_successes = sum(1 for item in summaries if item.get("specialist_success"))
+    chain_successes = sum(1 for item in summaries if item.get("chain_success"))
     print(
         f"{label}:",
         {
@@ -1085,6 +1334,8 @@ def print_eval_summary(label, summaries):
             "episodes": len(summaries),
             "successes": successes,
             "specialist_successes": specialist_successes,
+            "chain_successes": chain_successes,
+            "chain_success_rate": round(chain_successes / len(summaries), 3),
             "best_flip_progress": max(item["max_flip_progress"] for item in summaries),
             "avg_reward": round(sum(item["reward"] for item in summaries) / len(summaries), 3),
             "fail_reasons": {

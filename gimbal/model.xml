@@ -1,0 +1,207 @@
+<mujoco model="hopper_gimbal">
+    <compiler angle="degree" coordinate="local"/>
+
+    <option gravity="0 0 -9.81"
+            timestep="0.002"
+            integrator="implicitfast"
+            iterations="80"/>
+
+    <visual>
+        <headlight ambient="0.5 0.5 0.5"/>
+    </visual>
+
+    <!-- Materials are the same as hopper_default.xml. -->
+    <asset>
+        <texture type="skybox"
+                 builtin="gradient"
+                 rgb1="0.2 0.3 0.4"
+                 rgb2="0 0 0"
+                 width="512"
+                 height="512"/>
+
+        <material name="body_mat" rgba="0.7 0.7 0.7 1"/>
+        <material name="leg_mat" rgba="0.2 0.2 0.2 1"/>
+        <material name="pad_mat" rgba="0.1 0.8 0.1 1"/>
+        <material name="foot_mat" rgba="0.9 0.9 0.2 1"/>
+    </asset>
+
+    <worldbody>
+        <!-- The original hopper COM was at world Z=0.355. In the gimbal model
+             the COM is the world origin, so ground/pad move down by 0.355 m. -->
+        <!-- Ground is at -0.40 m relative to the gimbal pivot (which is 40 cm above the ground) -->
+        <geom name="ground"
+              type="plane"
+              pos="0 0 -0.40"
+              size="20 20 0.1"
+              rgba="0.3 0.3 0.3 1"
+              friction="1.2 0.1 0.1"
+              contype="0"
+              conaffinity="0"/>
+
+        <body name="landing_pad" pos="0 0 -0.40">
+            <geom name="pad_geom"
+                  type="cylinder"
+                  pos="0 0 0.01"
+                  size="0.5 0.01"
+                  material="pad_mat"
+                  contype="0"
+                  conaffinity="0"/>
+        </body>
+
+        <!-- Gimbal pivot frame at (0, 0, 0) -->
+        <body name="gimbal_roll_frame" pos="0 0 0">
+            <inertial pos="0 0 0"
+                      mass="0.00001"
+                      diaginertia="0.0000001 0.0000001 0.0000001"/>
+            <joint name="gimbal_roll"
+                       type="hinge"
+                       axis="1 0 0"
+                       range="-60 60"
+                       damping="0.025"
+                       armature="0.001"/>
+
+            <body name="rocket" pos="0 0 0">
+                <joint name="gimbal_pitch"
+                           type="hinge"
+                           axis="0 1 0"
+                           range="-60 60"
+                           damping="0.025"
+                           armature="0.001"/>
+
+                <!-- Rocket COM is exactly in the middle of the 80 cm body.
+                     Since body goes from z = -0.25 to z = 0.55, the center is at z = 0.15 m.
+                     Mass is 1.8 kg. Inertia is recalculated. -->
+                <inertial pos="0 0 0.15"
+                          mass="1.8"
+                          diaginertia="0.098 0.098 0.003"/>
+
+                <site name="COM"
+                      pos="0 0 0.15"
+                      size="0.02"
+                      rgba="1 0 0 1"/>
+
+                <!-- Rocket body is 80 cm long, going from z = -0.250 to z = 0.550 -->
+                <geom name="main_body"
+                      type="cylinder"
+                      fromto="0 0 -0.250 0 0 0.550"
+                      size="0.06"
+                      rgba="0.8 0.8 0.8 0.7"
+                      material="body_mat"/>
+
+                <!-- Landing legs reaching down to ground level (z = -0.40 m) -->
+                <geom name="leg1"
+                      type="capsule"
+                      fromto="0 0 -0.05 0.4 0 -0.40"
+                      size="0.012"
+                      material="leg_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <geom name="foot1_geom"
+                      type="sphere"
+                      pos="0.4 0 -0.40"
+                      size="0.025"
+                      material="foot_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <site name="foot1"
+                      pos="0.4 0 -0.40"
+                      size="0.015"
+                      rgba="1 0 0 1"/>
+
+                <geom name="leg2"
+                      type="capsule"
+                      fromto="0 0 -0.05 -0.4 0 -0.40"
+                      size="0.012"
+                      material="leg_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <geom name="foot2_geom"
+                      type="sphere"
+                      pos="-0.4 0 -0.40"
+                      size="0.025"
+                      material="foot_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <site name="foot2"
+                      pos="-0.4 0 -0.40"
+                      size="0.015"
+                      rgba="0 1 0 1"/>
+
+                <geom name="leg3"
+                      type="capsule"
+                      fromto="0 0 -0.05 0 0.4 -0.40"
+                      size="0.012"
+                      material="leg_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <geom name="foot3_geom"
+                      type="sphere"
+                      pos="0 0.4 -0.40"
+                      size="0.025"
+                      material="foot_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <site name="foot3"
+                      pos="0 0.4 -0.40"
+                      size="0.015"
+                      rgba="0 0 1 1"/>
+
+                <geom name="leg4"
+                      type="capsule"
+                      fromto="0 0 -0.05 0 -0.4 -0.40"
+                      size="0.012"
+                      material="leg_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <geom name="foot4_geom"
+                      type="sphere"
+                      pos="0 -0.4 -0.40"
+                      size="0.025"
+                      material="foot_mat"
+                      contype="0"
+                      conaffinity="0"/>
+                <site name="foot4"
+                      pos="0 -0.4 -0.40"
+                      size="0.015"
+                      rgba="1 1 0 1"/>
+
+                <!-- Engine pivot is at the bottom of the body (z = -0.250) -->
+                <body name="tvc_x_frame" pos="0 0 -0.250">
+                    <inertial pos="0 0 0"
+                              mass="0.01"
+                              diaginertia="0.001 0.001 0.001"/>
+                    <joint name="tvc_x"
+                           type="hinge"
+                           axis="1 0 0"
+                           range="-20 20"
+                           damping="1.0"/>
+
+                    <body name="tvc_y_frame">
+                        <inertial pos="0 0 0"
+                                  mass="0.02"
+                                  diaginertia="0.0002 0.0002 0.0002"/>
+                        <joint name="tvc_y"
+                               type="hinge"
+                               axis="0 1 0"
+                               range="-20 20"
+                               damping="1.0"/>
+
+                        <geom name="engine"
+                               type="cylinder"
+                               pos="0 0 -0.025"
+                               size="0.04 0.02"
+                               rgba="0.8 0.2 0.2 1"
+                               contype="0"
+                               conaffinity="0"/>
+
+                        <!-- Thrust site is at z = 0 relative to tvc_y_frame (which is z = -0.250 on rocket) -->
+                        <site name="thrust_site"
+                              pos="0 0 0.0"
+                              size="0.02"
+                              rgba="1 0.5 0 1"/>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+</mujoco>
