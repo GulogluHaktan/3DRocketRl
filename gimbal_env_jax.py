@@ -85,12 +85,12 @@ class GimbalJaxEnv:
             "recovery_ground_stall": 180.0,
             "recovery_upright_climb": 35.0,
             "recovery_rel_dist": 0.0,
-            "hover_linear_speed": 1.5,
-            "hover_angular_speed": 1.45,
-            "hover_joint_speed": 0.15,
+            "hover_linear_speed": 3.0,
+            "hover_angular_speed": 6.0,
+            "hover_joint_speed": 1.0,
             "hover_upright": 45.0,
             "hover_height_error": 30.0,
-            "hover_vertical_speed": 10.0,
+            "hover_vertical_speed": 15.0,
             "hover_falling_thrust": 80.0,
             "hover_low_altitude": 26.0,
             "hover_upward_speed": 28.0,
@@ -350,12 +350,14 @@ class GimbalJaxEnv:
         # Select active phase reward
         reward = jnp.where(next_phase >= 1, reward_hover, reward_recovery)
         
-        # Action rate penalty to prevent high-frequency jitter (smooth control)
+        # Action rate penalty: small in recovery (0.2) to allow quick setup, large in hover (2.0) to prevent jitter
         action_diff = action - state.last_action
-        reward -= jnp.sum(jnp.square(action_diff)) * 0.2
+        action_diff_weight = jnp.where(next_phase >= 1, 2.0, 0.2)
+        reward -= jnp.sum(jnp.square(action_diff)) * action_diff_weight
         
-        # Control effort penalty on TVC commands to keep them centered at 0 when vertical
-        reward -= jnp.sum(jnp.square(action[1:3])) * 1.0
+        # Control effort penalty: small in recovery (0.5), large in hover (2.0) to center TVC nozzle at 0 when stable
+        control_effort_weight = jnp.where(next_phase >= 1, 2.0, 0.5)
+        reward -= jnp.sum(jnp.square(action[1:3])) * control_effort_weight
         
         # Transition bonus
         reward += jnp.where(transition_to_hover, rw["phase_recovery_to_hover_bonus"], 0.0)
