@@ -20,6 +20,23 @@ MuJoCo MJX / JAX üzerinde SAC ile eğitim yapılır; klasik MuJoCo/SB3 dosyalar
 
 Birleşik CLI (`rl.py`) → `mjx/` (roket ortamı + SAC train/eval) ve `gimbal/` (masa-gimbal ortamları). Ayrıntılar: [docs/README_ayrintili.md](docs/README_ayrintili.md).
 
+### Akış şeması (nasıl çalışır)
+
+```mermaid
+flowchart LR
+  CLI["rl.py CLI"] --> TR["train-mjx / train-gimbal-mjx"]
+  TR --> ENV["MJX ortamı: RocketMJXEnv / GimbalMJXEnv"]
+  ENV --> SAC["Brax SAC eğitimi - GPU"]
+  SAC --> OUT["runs/RUN_DIR: checkpoint, CSV, video"]
+  OUT --> EV["eval-mjx / watch-mjx"]
+  subgraph FAZ["Roket faz zinciri"]
+    P0["climb"] --> P1["flip"] --> P2["recovery"] --> P3["hover"]
+  end
+  ENV -.-> P0
+```
+
+Politika, MJX ortamında GPU üzerinde Brax-SAC ile eğitilir; roket görevi dört fazlı zincir olarak ilerler, çıktılar `runs/` altında toplanır ve `eval`/`watch` komutlarıyla değerlendirilir.
+
 ## Seçilmiş sonuçlar
 
 *TODO: `plots/sonuc_1.png` … eklenecek (eğitim eğrileri, faz başarı oranları). Şu an yayımlanmış sonuç grafiği yok; ham çıktılar `runs/` altında üretilir ve git'e alınmaz.*
