@@ -1,126 +1,89 @@
 # 3D Rocket MJX RL
 
-GPU-native MJX training workspace for a TVC rocket phase chain and a table-gimbal stabilization task.
+**TVC'li bir roketin climb → flip → recovery → hover faz zincirini ve masa-gimbal stabilizasyonunu GPU-yerel MJX ile pekiştirmeli öğrenmeyle eğiten çalışma alanı.**
 
-Main rocket chain:
+MuJoCo MJX / JAX üzerinde SAC ile eğitim yapılır; klasik MuJoCo/SB3 dosyaları yalnızca karşılaştırma ve görselleştirme için referans olarak tutulur.
 
-```text
-climb -> flip -> recovery -> hover
-```
+![Demo](assets/demo.gif)
+*TODO: `assets/demo.gif` — faz zincirini gösteren kısa kayıt (10 MB altı) eklenecek.*
 
-The public workflow is MJX-first. Classic MuJoCo/SB3 files remain as reference utilities for comparison and visualization, but new training should start from the MJX commands below.
+## Özet
 
-## Project Layout
+| | |
+|---|---|
+| **Problem** | Thrust-vector-control (TVC) roketinin `climb → flip → recovery → hover` zincirinin ve masa-gimbal denge görevinin öğrenilmesi |
+| **Yöntem** | MJX tabanlı, GPU-yerel SAC eğitimi; birleşik CLI (`rl.py`) |
+| **Simülasyon / donanım** | MuJoCo MJX, JAX/Brax, Python 3.11 |
+| **Makale** | — (henüz yok) |
 
-```text
-3drocket/
-├── rl.py                 # Unified CLI
-├── mjx/                  # MJX rocket environment and SAC train/eval helpers
-├── gimbal/               # Table-gimbal environments and MJX/SB3 training code
-├── assets/               # Rocket MuJoCo XML assets
-├── algorithms/           # Legacy SB3 algorithm wrappers
-├── tests/                # Pytest coverage for MJX, gimbal, and handoff rules
-├── configs/              # Example local configs
-├── docs/                 # Technical notes
-├── models/               # Optional published model placeholders
-└── runs/                 # Generated training outputs, ignored by git
-```
+### Sistem mimarisi
 
-Do not commit run directories, checkpoints, generated plots, local secrets, or machine-specific configs.
+Birleşik CLI (`rl.py`) → `mjx/` (roket ortamı + SAC train/eval) ve `gimbal/` (masa-gimbal ortamları). Ayrıntılar: [docs/README_ayrintili.md](docs/README_ayrintili.md).
 
-## MJX Setup
+## Seçilmiş sonuçlar
 
-Use Python 3.11 for the pinned JAX/Brax/MuJoCo stack:
+*TODO: `plots/sonuc_1.png` … eklenecek (eğitim eğrileri, faz başarı oranları). Şu an yayımlanmış sonuç grafiği yok; ham çıktılar `runs/` altında üretilir ve git'e alınmaz.*
 
+*Tüm şekiller `plots/` klasöründe tutulacaktır.*
+
+## Kurulum
+
+### Gereksinimler
+- Linux, Python 3.11 (JAX/Brax/MuJoCo sabit sürümleri için)
+- GPU önerilir (MJX)
+
+### Adımlar
 ```bash
+git clone https://github.com/GulogluHaktan/3DRocketRl.git
+cd 3DRocketRl
 python3.11 -m venv .venv-mjx
 .venv-mjx/bin/python -m pip install -r requirements-mjx.lock
-```
-
-Verify the environment:
-
-```bash
 .venv-mjx/bin/python rl.py mjx-doctor
-.venv-mjx/bin/python rl.py benchmark-mjx --num-envs 128 256 512
 ```
 
-The lock file pins JAX, Brax, MuJoCo, and MJX versions together. Do not upgrade only one of these packages without rerunning the doctor and tests.
-
-## Rocket MJX Training
-
-Short smoke run:
+## Kullanım
 
 ```bash
-.venv-mjx/bin/python rl.py train-mjx \
-  --total-env-steps 100000 \
-  --curriculum-stages 1 \
-  --num-envs 128 \
-  --run-dir runs/mjx_sac_smoke
+# hızlı duman eğitimi
+.venv-mjx/bin/python rl.py train-mjx --total-env-steps 100000 --curriculum-stages 1 --num-envs 128 --run-dir runs/mjx_sac_smoke
+.venv-mjx/bin/python rl.py eval-mjx --model runs/mjx_sac_smoke --episodes 1000
+# masa-gimbal
+.venv-mjx/bin/python rl.py train-gimbal-mjx --total-env-steps 8000000 --curriculum-stages 3 --num-envs 512 --run-dir runs/mjx_gimbal_sac_main
+.venv-mjx/bin/python -m pytest -q
+```
+Beklenen çıktı: `runs/<run_dir>/` altında checkpoint, adım CSV'leri ve videolar. Ayrıntı: [docs/README_ayrintili.md](docs/README_ayrintili.md).
+
+## Sonuçları yeniden üret
+
+| Şekil | Komut |
+|---|---|
+| `plots/sonuc_1.png` | TODO: `scripts/plot_1.py` henüz yok |
+
+## Proje yapısı
+
+```
+3DRocketRl/
+├── rl.py            # birleşik CLI
+├── mjx/             # MJX roket ortamı, SAC train/eval
+├── gimbal/          # masa-gimbal ortamları ve eğitim kodu
+├── assets/          # roket MuJoCo XML'leri, README görselleri
+├── algorithms/      # eski SB3 algoritma sarmalayıcıları
+├── configs/         # örnek yerel ayarlar
+├── docs/            # teknik notlar
+├── models/          # opsiyonel yayınlanmış model yer tutucuları
+├── tests/           # pytest
+├── runs/            # üretilen çıktılar (git dışı)
+└── requirements*.txt / *.lock
 ```
 
-Main training profile:
+## Atıf, lisans, iletişim
 
-```bash
-.venv-mjx/bin/python rl.py train-mjx \
-  --total-env-steps 50000000 \
-  --curriculum-stages 3 \
-  --num-envs 512 \
-  --num-eval-envs 128 \
-  --batch-size 512 \
-  --min-replay-size 32768 \
-  --max-replay-size 262144 \
-  --grad-updates-per-step 16
+```bibtex
+@misc{rocketmjx2026,
+  title  = {3D Rocket MJX RL},
+  author = {Haktan G{\"u}lo{\u{g}}lu},
+  year   = {2026},
+  url    = {https://github.com/GulogluHaktan/3DRocketRl}
+}
 ```
-
-Evaluate and visualize:
-
-```bash
-.venv-mjx/bin/python rl.py eval-mjx --model runs/mjx_sac_chain_<run> --episodes 1000
-.venv-mjx/bin/python rl.py watch-mjx --model runs/mjx_sac_chain_<run>
-```
-
-Acceptance targets are `climb_handoff_rate >= 0.90`, `flip_handoff_rate >= 0.85`, `recovery_handoff_rate >= 0.85`, `hover_success_rate >= 0.90`, and `chain_success_rate >= 0.80`.
-
-## Table Gimbal MJX
-
-Train the table-gimbal SAC curriculum:
-
-```bash
-.venv-mjx/bin/python rl.py train-gimbal-mjx \
-  --total-env-steps 8000000 \
-  --curriculum-stages 3 \
-  --num-envs 512 \
-  --run-dir runs/mjx_gimbal_sac_main
-```
-
-Smoke profile:
-
-```bash
-.venv-mjx/bin/python rl.py train-gimbal-mjx \
-  --total-env-steps 1000 \
-  --curriculum-stages 1 \
-  --num-envs 8 \
-  --num-eval-envs 4 \
-  --run-dir runs/mjx_gimbal_smoke
-```
-
-Evaluate and watch:
-
-```bash
-.venv-mjx/bin/python rl.py eval-gimbal-mjx --model runs/mjx_gimbal_sac_main --episodes 100
-.venv-mjx/bin/python rl.py watch-gimbal-mjx --model runs/mjx_gimbal_sac_main --episodes 3
-```
-
-The watch command replays the JAX policy in the classic rendered `GimbalEnv` so the table-gimbal behavior can be inspected visually.
-
-## Tests
-
-Run the active checks from the MJX environment:
-
-```bash
-.venv-mjx/bin/python -m pytest -q tests/test_mjx_env.py
-.venv-mjx/bin/python -m pytest -q tests/test_gimbal_env.py
-.venv-mjx/bin/python -m py_compile rl.py mjx/*.py gimbal/*.py
-```
-
-The MJX rocket handoff tests use the 10 m climb-to-flip standard.
+Lisans: TODO. İletişim: MTA Yapay Zeka Merkezi, Haktan Güloğlu.

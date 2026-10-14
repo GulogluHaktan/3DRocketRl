@@ -81,6 +81,18 @@ def test_mjx_climb_handoff_requires_height_and_bounded_speed():
     assert int(transition_at(10.0, 1.9, 0.49)) == PHASE_FLIP
 
 
+def test_mjx_timeout_is_reported_as_a_failure_reason():
+    env = RocketMJXEnv(curriculum_stage=3)
+    env._episode_length = 1
+    state = env.reset(jax.random.key(31))
+
+    next_state = env.step(state, jp.zeros(3))
+
+    assert bool(next_state.done)
+    assert bool(next_state.pipeline_state.fail)
+    assert float(next_state.pipeline_state.fail_reason_code) == 3.0
+
+
 def test_mjx_fail_reason_codes_cover_speed_limits():
     env = RocketMJXEnv(curriculum_stage=3)
     state = env.reset(jax.random.key(31))

@@ -641,6 +641,9 @@ class RocketMJXEnv(base.Env):
         ) = self._reward_and_transition(candidate, action)
         episode_step = rocket.episode_step + 1
         timeout = episode_step >= self._episode_length
+        timeout_fail = timeout & ~success
+        fail = fail | timeout_fail
+        fail_code = jp.where((fail_code == 0.0) & timeout_fail, 3.0, fail_code)
         done = success | fail | timeout
         q = data.qpos[3:7] / jp.maximum(jp.linalg.norm(data.qpos[3:7]), 1e-8)
         bottom_height = data.qpos[2] + (quat_to_mat(q) @ jp.array([0.0, 0.0, -0.355]))[2]
