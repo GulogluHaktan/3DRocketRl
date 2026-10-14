@@ -1,55 +1,57 @@
+🇬🇧 English · 🇹🇷 [Türkçe](README.tr.md)
+
 # 3D Rocket MJX RL
 
-**TVC'li bir roketin climb → flip → recovery → hover faz zincirini ve masa-gimbal stabilizasyonunu GPU-yerel MJX ile pekiştirmeli öğrenmeyle eğiten çalışma alanı.**
+**A GPU-native MJX workspace that trains a TVC rocket's climb → flip → recovery → hover phase chain and a table-gimbal stabilization task with reinforcement learning.**
 
-MuJoCo MJX / JAX üzerinde SAC ile eğitim yapılır; klasik MuJoCo/SB3 dosyaları yalnızca karşılaştırma ve görselleştirme için referans olarak tutulur.
+Training runs SAC on MuJoCo MJX / JAX; classic MuJoCo/SB3 files are kept only as reference utilities for comparison and visualization.
 
 ![Demo](assets/demo.gif)
-*TODO: `assets/demo.gif` — faz zincirini gösteren kısa kayıt (10 MB altı) eklenecek.*
+*TODO: add `assets/demo.gif` (under 10 MB) showing the phase chain.*
 
-## Özet
+## Summary
 
 | | |
 |---|---|
-| **Problem** | Thrust-vector-control (TVC) roketinin `climb → flip → recovery → hover` zincirinin ve masa-gimbal denge görevinin öğrenilmesi |
-| **Yöntem** | MJX tabanlı, GPU-yerel SAC eğitimi; birleşik CLI (`rl.py`) |
-| **Simülasyon / donanım** | MuJoCo MJX, JAX/Brax, Python 3.11 |
-| **Makale** | — (henüz yok) |
+| **Problem** | Learning the thrust-vector-control (TVC) rocket chain `climb → flip → recovery → hover` and a table-gimbal balance task |
+| **Method** | MJX-based, GPU-native SAC training; unified CLI (`rl.py`) |
+| **Simulation / hardware** | MuJoCo MJX, JAX/Brax, Python 3.11 |
+| **Paper** | — (none yet) |
 
-### Sistem mimarisi
+### System architecture
 
-Birleşik CLI (`rl.py`) → `mjx/` (roket ortamı + SAC train/eval) ve `gimbal/` (masa-gimbal ortamları). Ayrıntılar: [docs/README_ayrintili.md](docs/README_ayrintili.md).
+Unified CLI (`rl.py`) → `mjx/` (rocket environment + SAC train/eval) and `gimbal/` (table-gimbal environments). Details: [docs/README_ayrintili.md](docs/README_ayrintili.md) (Turkish/English notes).
 
-### Akış şeması (nasıl çalışır)
+### Flow diagram (how it works)
 
 ```mermaid
 flowchart LR
   CLI["rl.py CLI"] --> TR["train-mjx / train-gimbal-mjx"]
-  TR --> ENV["MJX ortamı: RocketMJXEnv / GimbalMJXEnv"]
-  ENV --> SAC["Brax SAC eğitimi - GPU"]
+  TR --> ENV["MJX env: RocketMJXEnv / GimbalMJXEnv"]
+  ENV --> SAC["Brax SAC training - GPU"]
   SAC --> OUT["runs/RUN_DIR: checkpoint, CSV, video"]
   OUT --> EV["eval-mjx / watch-mjx"]
-  subgraph FAZ["Roket faz zinciri"]
+  subgraph PH["Rocket phase chain"]
     P0["climb"] --> P1["flip"] --> P2["recovery"] --> P3["hover"]
   end
   ENV -.-> P0
 ```
 
-Politika, MJX ortamında GPU üzerinde Brax-SAC ile eğitilir; roket görevi dört fazlı zincir olarak ilerler, çıktılar `runs/` altında toplanır ve `eval`/`watch` komutlarıyla değerlendirilir.
+The policy is trained with Brax-SAC on GPU inside the MJX environment; the rocket task advances through a four-phase chain, outputs are collected under `runs/` and evaluated with the `eval`/`watch` commands.
 
-## Seçilmiş sonuçlar
+## Selected results
 
-*TODO: `plots/sonuc_1.png` … eklenecek (eğitim eğrileri, faz başarı oranları). Şu an yayımlanmış sonuç grafiği yok; ham çıktılar `runs/` altında üretilir ve git'e alınmaz.*
+*TODO: add `plots/sonuc_1.png` … (training curves, per-phase success rates). No published result plots yet; raw outputs are produced under `runs/` and are not tracked by git.*
 
-*Tüm şekiller `plots/` klasöründe tutulacaktır.*
+*All figures will be kept in the `plots/` folder.*
 
-## Kurulum
+## Installation
 
-### Gereksinimler
-- Linux, Python 3.11 (JAX/Brax/MuJoCo sabit sürümleri için)
-- GPU önerilir (MJX)
+### Requirements
+- Linux, Python 3.11 (for the pinned JAX/Brax/MuJoCo stack)
+- GPU recommended (MJX)
 
-### Adımlar
+### Steps
 ```bash
 git clone https://github.com/GulogluHaktan/3DRocketRl.git
 cd 3DRocketRl
@@ -58,42 +60,42 @@ python3.11 -m venv .venv-mjx
 .venv-mjx/bin/python rl.py mjx-doctor
 ```
 
-## Kullanım
+## Usage
 
 ```bash
-# hızlı duman eğitimi
+# quick smoke training
 .venv-mjx/bin/python rl.py train-mjx --total-env-steps 100000 --curriculum-stages 1 --num-envs 128 --run-dir runs/mjx_sac_smoke
 .venv-mjx/bin/python rl.py eval-mjx --model runs/mjx_sac_smoke --episodes 1000
-# masa-gimbal
+# table gimbal
 .venv-mjx/bin/python rl.py train-gimbal-mjx --total-env-steps 8000000 --curriculum-stages 3 --num-envs 512 --run-dir runs/mjx_gimbal_sac_main
 .venv-mjx/bin/python -m pytest -q
 ```
-Beklenen çıktı: `runs/<run_dir>/` altında checkpoint, adım CSV'leri ve videolar. Ayrıntı: [docs/README_ayrintili.md](docs/README_ayrintili.md).
+Expected output: checkpoints, step CSVs and videos under `runs/<run_dir>/`. Details: [docs/README_ayrintili.md](docs/README_ayrintili.md).
 
-## Sonuçları yeniden üret
+## Reproducing the results
 
-| Şekil | Komut |
+| Figure | Command |
 |---|---|
-| `plots/sonuc_1.png` | TODO: `scripts/plot_1.py` henüz yok |
+| `plots/sonuc_1.png` | TODO: `scripts/plot_1.py` not written yet |
 
-## Proje yapısı
+## Project structure
 
 ```
 3DRocketRl/
-├── rl.py            # birleşik CLI
-├── mjx/             # MJX roket ortamı, SAC train/eval
-├── gimbal/          # masa-gimbal ortamları ve eğitim kodu
-├── assets/          # roket MuJoCo XML'leri, README görselleri
-├── algorithms/      # eski SB3 algoritma sarmalayıcıları
-├── configs/         # örnek yerel ayarlar
-├── docs/            # teknik notlar
-├── models/          # opsiyonel yayınlanmış model yer tutucuları
+├── rl.py            # unified CLI
+├── mjx/             # MJX rocket env, SAC train/eval
+├── gimbal/          # table-gimbal envs and training code
+├── assets/          # rocket MuJoCo XMLs, README images
+├── algorithms/      # legacy SB3 algorithm wrappers
+├── configs/         # example local configs
+├── docs/            # technical notes
+├── models/          # optional published model placeholders
 ├── tests/           # pytest
-├── runs/            # üretilen çıktılar (git dışı)
+├── runs/            # generated outputs (git-ignored)
 └── requirements*.txt / *.lock
 ```
 
-## Atıf, lisans, iletişim
+## Citation, license, contact
 
 ```bibtex
 @misc{rocketmjx2026,
@@ -103,4 +105,4 @@ Beklenen çıktı: `runs/<run_dir>/` altında checkpoint, adım CSV'leri ve vide
   url    = {https://github.com/GulogluHaktan/3DRocketRl}
 }
 ```
-Lisans: TODO. İletişim: MTA Yapay Zeka Merkezi, Haktan Güloğlu.
+License: TODO. Contact: MTA Artificial Intelligence Center, Haktan Güloğlu.
